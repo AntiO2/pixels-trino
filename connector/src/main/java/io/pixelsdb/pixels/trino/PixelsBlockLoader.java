@@ -8,19 +8,7 @@ import java.util.Optional;
 
 import io.airlift.slice.Slices;
 import io.pixelsdb.pixels.core.TypeDescription;
-import io.pixelsdb.pixels.core.vector.BinaryColumnVector;
-import io.pixelsdb.pixels.core.vector.ByteColumnVector;
-import io.pixelsdb.pixels.core.vector.ColumnVector;
-import io.pixelsdb.pixels.core.vector.DateColumnVector;
-import io.pixelsdb.pixels.core.vector.DecimalColumnVector;
-import io.pixelsdb.pixels.core.vector.DictionaryColumnVector;
-import io.pixelsdb.pixels.core.vector.DoubleColumnVector;
-import io.pixelsdb.pixels.core.vector.IntColumnVector;
-import io.pixelsdb.pixels.core.vector.LongColumnVector;
-import io.pixelsdb.pixels.core.vector.LongDecimalColumnVector;
-import io.pixelsdb.pixels.core.vector.TimeColumnVector;
-import io.pixelsdb.pixels.core.vector.TimestampColumnVector;
-import io.pixelsdb.pixels.core.vector.VectorColumnVector;
+import io.pixelsdb.pixels.core.vector.*;
 import io.pixelsdb.pixels.trino.block.TimeArrayBlock;
 import io.pixelsdb.pixels.trino.block.VarcharArrayBlock;
 import io.trino.spi.block.ArrayBlock;
@@ -81,15 +69,12 @@ final class PixelsBlockLoader
                 block = new LongArrayBlock(batchSize, Optional.ofNullable(lcv.isNull), lcv.vector);
                 break;
             case DOUBLE:
-            case FLOAT:
-                /**
-                 * According to TypeDescription.createColumn(),
-                 * both float and double type use DoubleColumnVector, while they use
-                 * FloatColumnReader and DoubleColumnReader respectively according to
-                 * io.pixelsdb.pixels.reader.ColumnReader.newColumnReader().
-                 */
                 DoubleColumnVector dbcv = (DoubleColumnVector) vector;
                 block = new LongArrayBlock(batchSize, Optional.ofNullable(dbcv.isNull), dbcv.vector);
+                break;
+            case FLOAT:
+                FloatColumnVector dfcv = (FloatColumnVector) vector;
+                block = new IntArrayBlock(batchSize, Optional.ofNullable(dfcv.isNull), dfcv.vector);
                 break;
             case DECIMAL:
                 /**
