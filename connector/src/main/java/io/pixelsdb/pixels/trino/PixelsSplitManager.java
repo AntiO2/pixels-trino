@@ -1388,18 +1388,15 @@ public class PixelsSplitManager implements ConnectorSplitManager
         {
             HostAddress address = HostAddress.fromString(retinaAddress.getAddress() + ":" + retinaPort);
 
-            for(int virtualNodeId = 0; virtualNodeId < virtualNodeNum; ++virtualNodeId)
-            {
-                PixelsBufferSplit split = new PixelsBufferSplit(transHandle.getTransId(), splitId++, connectorId,
-                        schemaName, tableName, tableId, virtualNodeId,
-                        storageScheme,
-                        List.of(address),
-                        columnOrder, emptyConstraint, // maybe useless
-                        originColumnCnt,
-                        schema.toString()
-                );
-                pixelsBufferSplits.add(split);
-            }
+            PixelsBufferSplit split = new PixelsBufferSplit(transHandle.getTransId(), splitId++, connectorId,
+                    schemaName, tableName, tableId, retinaAddress.getVirtualNodeId(),
+                    storageScheme,
+                    List.of(address),
+                    columnOrder, emptyConstraint, // maybe useless
+                    originColumnCnt,
+                    schema.toString()
+            );
+            pixelsBufferSplits.add(split);
         }
         return pixelsBufferSplits;
     }
