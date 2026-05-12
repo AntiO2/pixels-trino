@@ -24,14 +24,21 @@ import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.etcd.jetcd.KeyValue;
 import io.pixelsdb.pixels.cache.PixelsCacheUtil;
+import io.pixelsdb.pixels.common.exception.MainIndexException;
 import io.pixelsdb.pixels.common.exception.MetadataException;
 import io.pixelsdb.pixels.common.exception.RetinaException;
+import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
+import io.pixelsdb.pixels.common.index.IndexOption;
 import io.pixelsdb.pixels.common.layout.*;
+import io.pixelsdb.pixels.common.index.MainIndex;
+import io.pixelsdb.pixels.common.index.MainIndexFactory;
+import io.pixelsdb.pixels.common.index.SinglePointIndexFactory;
 import io.pixelsdb.pixels.common.metadata.SchemaTableName;
 import io.pixelsdb.pixels.common.metadata.domain.Table;
 import io.pixelsdb.pixels.common.metadata.domain.*;
@@ -39,6 +46,7 @@ import io.pixelsdb.pixels.common.node.NodeService;
 import io.pixelsdb.pixels.common.physical.Location;
 import io.pixelsdb.pixels.common.physical.Storage;
 import io.pixelsdb.pixels.common.physical.StorageFactory;
+import io.pixelsdb.pixels.common.retina.RetinaService;
 import io.pixelsdb.pixels.common.state.StateManager;
 import io.pixelsdb.pixels.common.turbo.ExecutorType;
 import io.pixelsdb.pixels.common.turbo.Output;
@@ -82,8 +90,10 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
+import io.pixelsdb.pixels.index.IndexProto;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -456,7 +466,11 @@ public class PixelsSplitManager implements ConnectorSplitManager
                     pixelsSplits = splitsBuilder.build();
                 } else
                 {
-                    List<PixelsFileSplit> pixelsFileSplits = getScanSplits(transHandle, session, tableHandle);
+                    List<PixelsFileSplit> pixelsFileSplits = getPrimaryKeySplits(transHandle, session, tableHandle);
+                    if (pixelsFileSplits == null)
+                    {
+                        pixelsFileSplits = getScanSplits(transHandle, session, tableHandle);
+                    }
                     Collections.shuffle(pixelsFileSplits);
                     pixelsSplits = pixelsFileSplits.stream()
                             .map(split -> (PixelsSplit) split)
@@ -1361,7 +1375,6 @@ public class PixelsSplitManager implements ConnectorSplitManager
     {
         List<PixelsBufferSplit> pixelsBufferSplits = new ArrayList<>();
 
-        // Do not use constraint_ in the parameters, it is always TupleDomain.all().
         TupleDomain<PixelsColumnHandle> constraint = tableHandle.getConstraint();
         List<PixelsColumnHandle> desiredColumns = getIncludeColumns(tableHandle);
 
@@ -1371,9 +1384,6 @@ public class PixelsSplitManager implements ConnectorSplitManager
         int originColumnCnt = metadataProxy.getMetadataService().getColumns(schemaName, tableName, false).size();
 
         List<String> columnOrder = ImmutableList.of();
-        TupleDomain<PixelsColumnHandle> emptyConstraint = Constraint.alwaysTrue().getSummary().transformKeys(
-                columnHandle -> (PixelsColumnHandle) columnHandle);
-
         long tableId = metadataProxy.getTable(transHandle.getTransId(), schemaName, tableName).getId();
 
         TypeDescription schema = metadataProxy.getSchema(schemaName, tableName);
@@ -1392,13 +1402,249 @@ public class PixelsSplitManager implements ConnectorSplitManager
                     schemaName, tableName, tableId, retinaAddress.getVirtualNodeId(),
                     storageScheme,
                     List.of(address),
-                    columnOrder, emptyConstraint, // maybe useless
+                    columnOrder, constraint,
                     originColumnCnt,
                     schema.toString()
             );
             pixelsBufferSplits.add(split);
         }
         return pixelsBufferSplits;
+    }
+
+    private List<PixelsFileSplit> getPrimaryKeySplits(PixelsTransactionHandle transHandle, ConnectorSession session,
+                                                      PixelsTableHandle tableHandle)
+            throws MetadataException, IOException, RetinaException
+    {
+        TupleDomain<PixelsColumnHandle> constraint = tableHandle.getConstraint();
+        if (!constraint.getDomains().isPresent())
+        {
+            return null;
+        }
+
+        String schemaName = tableHandle.getSchemaName();
+        String tableName = tableHandle.getTableName();
+        Table table = metadataProxy.getTable(transHandle.getTransId(), schemaName, tableName);
+        io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndex =
+                metadataProxy.getMetadataService().getPrimaryIndex(table.getId());
+        if (primaryIndex == null || !primaryIndex.isPrimary())
+        {
+            return null;
+        }
+
+        List<Integer> keyColumnIds = primaryIndex.getKeyColumns().getKeyColumnIds();
+        if (keyColumnIds.isEmpty())
+        {
+            return null;
+        }
+
+        TypeDescription schema = metadataProxy.getSchema(schemaName, tableName);
+        ByteString indexKeyBytes = buildPrimaryIndexKey(constraint, keyColumnIds, schema);
+        if (indexKeyBytes == null)
+        {
+            return null;
+        }
+
+        IndexProto.RowLocation rowLocation = lookupPrimaryKeyRowLocation(table.getId(), primaryIndex, indexKeyBytes);
+        if (rowLocation == null)
+        {
+            return ImmutableList.of();
+        }
+
+        if (!isRowVisible(transHandle, rowLocation))
+        {
+            return ImmutableList.of();
+        }
+
+        Storage storage = StorageFactory.Instance().getStorage(table.getStorageScheme());
+        io.pixelsdb.pixels.common.metadata.domain.File file =
+                metadataProxy.getMetadataService().getFileById(rowLocation.getFileId());
+        String filePath = resolveFilePath(tableHandle, file.getPathId(), file);
+        List<HostAddress> addresses = toHostAddresses(storage.getLocations(filePath));
+        List<String> columnOrder = ImmutableList.of();
+        List<String> cacheOrder = ImmutableList.of();
+        PixelsFileSplit split = new PixelsFileSplit(
+                transHandle.getTransId(), 0L, connectorId,
+                schemaName, tableName, table.getStorageScheme().name(),
+                List.of(filePath),
+                List.of(rowLocation.getRgId()),
+                List.of(1),
+                false, storage.hasLocality(), addresses,
+                columnOrder, cacheOrder,
+                constraint, false, false);
+        return ImmutableList.of(split);
+    }
+
+    private IndexProto.RowLocation lookupPrimaryKeyRowLocation(long tableId,
+                                                               io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndex,
+                                                               ByteString indexKeyBytes)
+    {
+        int virtualNodeNum = Integer.parseInt(ConfigFactory.Instance().getProperty("node.virtual.num"));
+        try
+        {
+            for (int vNodeId = 0; vNodeId < virtualNodeNum; ++vNodeId)
+            {
+                IndexProto.IndexKey indexKey = IndexProto.IndexKey.newBuilder()
+                        .setTableId(tableId)
+                        .setIndexId(primaryIndex.getId())
+                        .setKey(indexKeyBytes)
+                        .setTimestamp(Long.MAX_VALUE)
+                        .build();
+                long rowId = SinglePointIndexFactory.Instance()
+                        .getSinglePointIndex(tableId, primaryIndex.getId(), IndexOption.builder().vNodeId(vNodeId).build())
+                        .getUniqueRowId(indexKey);
+                if (rowId >= 0)
+                {
+                    MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
+                    return mainIndex.getLocation(rowId);
+                }
+            }
+            return null;
+        } catch (SinglePointIndexException | MainIndexException e)
+        {
+            throw new TrinoException(PixelsErrorCode.PIXELS_SQL_EXECUTE_ERROR,
+                    "failed to lookup primary key row location", e);
+        }
+    }
+
+    private ByteString buildPrimaryIndexKey(TupleDomain<PixelsColumnHandle> constraint,
+                                            List<Integer> keyColumnIds, TypeDescription schema)
+    {
+        Map<PixelsColumnHandle, Domain> domains = constraint.getDomains().orElseThrow();
+        Map<Integer, PixelsColumnHandle> ordinalToHandle = new HashMap<>(domains.size());
+        for (PixelsColumnHandle columnHandle : domains.keySet())
+        {
+            ordinalToHandle.put(columnHandle.getLogicalOrdinal(), columnHandle);
+        }
+
+        List<TypeDescription> children = schema.getChildren();
+        List<byte[]> parts = new ArrayList<>(keyColumnIds.size());
+        int totalBytes = 0;
+        for (int keyColumnId : keyColumnIds)
+        {
+            PixelsColumnHandle columnHandle = ordinalToHandle.get(keyColumnId);
+            if (columnHandle == null)
+            {
+                return null;
+            }
+            Domain domain = domains.get(columnHandle);
+            if (domain == null || !domain.isSingleValue())
+            {
+                return null;
+            }
+
+            byte[] part = convertNativeValueToBytes(children.get(keyColumnId), columnHandle, domain.getSingleValue());
+            if (part == null)
+            {
+                return null;
+            }
+            parts.add(part);
+            totalBytes += part.length;
+        }
+
+        if (parts.size() == 1)
+        {
+            return ByteString.copyFrom(parts.getFirst());
+        }
+
+        ByteBuffer buffer = ByteBuffer.allocate(totalBytes);
+        for (byte[] part : parts)
+        {
+            buffer.put(part);
+        }
+        return ByteString.copyFrom((ByteBuffer) buffer.rewind());
+    }
+
+    private byte[] convertNativeValueToBytes(TypeDescription typeDescription, PixelsColumnHandle columnHandle, Object value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+
+        return switch (columnHandle.getTypeCategory())
+        {
+            case BOOLEAN -> new byte[]{(byte) ((Boolean) value ? 1 : 0)};
+            case BYTE -> new byte[]{((Number) value).byteValue()};
+            case SHORT, INT -> ByteBuffer.allocate(Integer.BYTES).putInt(((Number) value).intValue()).array();
+            case LONG -> ByteBuffer.allocate(Long.BYTES).putLong(((Number) value).longValue()).array();
+            case FLOAT -> ByteBuffer.allocate(Integer.BYTES)
+                    .putInt(Float.floatToIntBits(((Number) value).floatValue()))
+                    .array();
+            case DOUBLE -> ByteBuffer.allocate(Long.BYTES)
+                    .putLong(Double.doubleToLongBits(((Number) value).doubleValue()))
+                    .array();
+            case DATE -> ByteBuffer.allocate(Integer.BYTES).putInt(Math.toIntExact(((Number) value).longValue())).array();
+            case TIME -> ByteBuffer.allocate(Integer.BYTES).putInt(((Long) value).intValue()).array();
+            case TIMESTAMP -> ByteBuffer.allocate(Long.BYTES).putLong(((Number) value).longValue()).array();
+            case CHAR, VARCHAR, STRING -> value instanceof Slice slice ?
+                    typeDescription.convertSqlStringToByte(slice.toStringUtf8()) :
+                    typeDescription.convertSqlStringToByte(value.toString());
+            case VARBINARY, BINARY -> value instanceof Slice slice ? slice.getBytes() : (byte[]) value;
+            case DECIMAL -> typeDescription.convertSqlStringToByte(value.toString());
+            default -> throw new TrinoException(PixelsErrorCode.PIXELS_DATA_TYPE_ERROR,
+                    "unsupported primary key type for point lookup: " + columnHandle.getTypeCategory());
+        };
+    }
+
+    private boolean isRowVisible(PixelsTransactionHandle transHandle, IndexProto.RowLocation rowLocation)
+            throws RetinaException
+    {
+        String retinaEnabled = config.getConfigFactory().getProperty("retina.enable");
+        if (retinaEnabled == null || !retinaEnabled.equalsIgnoreCase("true"))
+        {
+            return true;
+        }
+
+        RetinaService.VisibilityResult visibilityResult = RetinaService.Instance().queryVisibility(
+                rowLocation.getFileId(),
+                new int[]{rowLocation.getRgId()},
+                transHandle.getTimestamp(),
+                transHandle.getTransId());
+        if (visibilityResult.isOffloaded())
+        {
+            logger.debug("skip primary-key point lookup visibility pruning because checkpoint visibility is offloaded");
+            return true;
+        }
+
+        long[][] bitmaps = visibilityResult.getBitmaps();
+        if (bitmaps.length == 0)
+        {
+            return true;
+        }
+        return !isBitSet(bitmaps[0], rowLocation.getRgRowOffset());
+    }
+
+    private static boolean isBitSet(long[] bitmap, int offset)
+    {
+        if (bitmap == null)
+        {
+            return false;
+        }
+        int wordIndex = offset >>> 6;
+        if (wordIndex >= bitmap.length)
+        {
+            return false;
+        }
+        return (bitmap[wordIndex] & (1L << (offset & 63))) != 0;
+    }
+
+    private String resolveFilePath(PixelsTableHandle tableHandle, long pathId, io.pixelsdb.pixels.common.metadata.domain.File file)
+            throws MetadataException
+    {
+        List<Layout> layouts = metadataProxy.getDataLayouts(tableHandle.getSchemaName(), tableHandle.getTableName());
+        for (Layout layout : layouts)
+        {
+            List<Path> paths = metadataProxy.getMetadataService().getPaths(layout.getId(), true);
+            for (Path path : paths)
+            {
+                if (path.getId() == pathId)
+                {
+                    return io.pixelsdb.pixels.common.metadata.domain.File.getFilePath(path, file);
+                }
+            }
+        }
+        throw new TrinoException(PixelsErrorCode.PIXELS_METADATA_ERROR,
+                "failed to resolve file path for file id " + file.getId());
     }
 
     private List<HostAddress> toHostAddresses(List<Location> locations)

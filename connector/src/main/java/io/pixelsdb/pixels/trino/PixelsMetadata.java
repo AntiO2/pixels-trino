@@ -557,7 +557,9 @@ public class PixelsMetadata implements ConnectorMetadata
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
             ConnectorSession session, ConnectorTableHandle handle, Constraint constraint)
     {
-        if (transHandle.getExecutorType() != ExecutorType.CF)
+        TupleDomain<PixelsColumnHandle> summary = constraint.getSummary()
+                .transformKeys(PixelsColumnHandle.class::cast);
+        if (transHandle.getExecutorType() != ExecutorType.CF && !isSinglePointLookupCandidate(summary))
         {
             // Issue #60: Trino's filters are currently more efficient, so pushdown should only be used for pixels-turbo.
             return Optional.empty();
@@ -566,8 +568,7 @@ public class PixelsMetadata implements ConnectorMetadata
         PixelsTableHandle tableHandle = (PixelsTableHandle) handle;
 
         TupleDomain<PixelsColumnHandle> oldDomain = tableHandle.getConstraint();
-        TupleDomain<PixelsColumnHandle> newDomain = oldDomain.intersect(constraint.getSummary()
-                .transformKeys(PixelsColumnHandle.class::cast));
+        TupleDomain<PixelsColumnHandle> newDomain = oldDomain.intersect(summary);
         TupleDomain<ColumnHandle> remainingFilter;
 
         if (newDomain.isNone())
@@ -596,6 +597,17 @@ public class PixelsMetadata implements ConnectorMetadata
         logger.debug("filter push down on " + newDomain.toString(session));
         return Optional.of(new ConstraintApplicationResult<>(
                 tableHandle, remainingFilter, constraint.getExpression(), false));
+    }
+
+    private static boolean isSinglePointLookupCandidate(TupleDomain<PixelsColumnHandle> tupleDomain)
+    {
+        if (!tupleDomain.getDomains().isPresent())
+        {
+            return false;
+        }
+
+        return tupleDomain.getDomains().get().values().stream()
+                .anyMatch(domain -> domain != null && domain.isSingleValue());
     }
 
     @Override
