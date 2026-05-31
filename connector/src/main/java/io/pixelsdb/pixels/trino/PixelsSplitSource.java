@@ -19,6 +19,7 @@
  */
 package io.pixelsdb.pixels.trino;
 
+import io.airlift.log.Logger;
 import io.pixelsdb.pixels.trino.split.PixelsSplit;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -37,7 +38,6 @@ public class PixelsSplitSource implements ConnectorSplitSource
 {
     private final List<PixelsSplit> splits;
     private int offset;
-
     public PixelsSplitSource(List<PixelsSplit> splits)
     {
         requireNonNull(splits, "splits is null");

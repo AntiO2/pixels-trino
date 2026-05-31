@@ -86,12 +86,16 @@ class PixelsFilePageSource implements PixelsPageSource
     private long memoryUsage = 0L;
     private PixelsReaderOption option;
     private int batchId;
+    private final int pathNum;
+    private final long startTime;
 
     public PixelsFilePageSource(PixelsFileSplit split, List<PixelsColumnHandle> columnHandles, PixelsTransactionHandle transactionHandle,
                                 Storage storage, List<MemoryMappedFile> cacheFiles, List<MemoryMappedFile> indexFiles, int swapZoneNum,
                                 PixelsFooterCache pixelsFooterCache)
     {
         this.split = split;
+        this.startTime = System.currentTimeMillis();
+        this.pathNum = split.getPathNum();
         this.transactionHandle = transactionHandle;
         this.storage = storage;
         this.columns = columnHandles;
@@ -447,6 +451,8 @@ class PixelsFilePageSource implements PixelsPageSource
             return;
         }
 
+        long duration = System.currentTimeMillis() - this.startTime;
+        logger.info("[FileNum: %s], [ReadTime: %s]", pathNum, duration);
         closeReader();
 
         closed = true;

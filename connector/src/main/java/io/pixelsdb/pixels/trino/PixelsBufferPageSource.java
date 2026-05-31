@@ -76,11 +76,14 @@ public class PixelsBufferPageSource implements PixelsPageSource
     private long totalReadTimeNanos;
     private PixelsReaderOption option;
     private PixelsRecordReaderBufferImpl reader;
+    private int pathNum;
+    private final long startTime;
 
     public PixelsBufferPageSource(PixelsBufferSplit split, List<PixelsColumnHandle> columnHandles,
                                   PixelsTransactionHandle transactionHandle,
                                   Storage storage)
     {
+        this.startTime = System.currentTimeMillis();
         this.startTimeNanos = System.nanoTime();
         this.split = split;
         this.transactionHandle = transactionHandle;
@@ -187,6 +190,8 @@ public class PixelsBufferPageSource implements PixelsPageSource
             RetinaProto.GetWriteBufferResponse response =
                     retinaService.getWriteBuffer(split.getSchemaName(), split.getTableName(), split.getvNodeId(), option.getTransTimestamp());
             byte[] activeMemtableData = response.getData().toByteArray();
+            pathNum = ((activeMemtableData.length != 0) ? 1:0) + response.getIdsList().size();
+
             this.reader = new PixelsRecordReaderBufferImpl(
                     option,
                     retinaServiceHost,
@@ -310,7 +315,8 @@ public class PixelsBufferPageSource implements PixelsPageSource
         {
             return;
         }
-
+        long duration = System.currentTimeMillis() - this.startTime;
+        logger.info("[FileNum: %s], [ReadTime: %s]", pathNum, duration);
         closed = true;
     }
 

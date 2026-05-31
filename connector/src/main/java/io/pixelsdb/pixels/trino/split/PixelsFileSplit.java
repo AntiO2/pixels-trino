@@ -180,6 +180,11 @@ public final class PixelsFileSplit extends PixelsSplit
         return !ensureLocality;
     }
 
+    public int getPathNum()
+    {
+        return paths.size();
+    }
+
     public boolean nextPath()
     {
         if (this.pathIndex + 1 < this.paths.size())

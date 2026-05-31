@@ -54,7 +54,7 @@ public class PixelsPageSourceProvider implements ConnectorPageSourceProvider
     private final PixelsFooterCache pixelsFooterCache;
     private final int swapZoneNum;
     private final PixelsTrinoConfig config;
-
+    private long prevTransId = 0L;
     @Inject
     public PixelsPageSourceProvider(PixelsConnectorId connectorId, PixelsTrinoConfig config)
             throws Exception
@@ -102,6 +102,14 @@ public class PixelsPageSourceProvider implements ConnectorPageSourceProvider
         List<PixelsColumnHandle> pixelsColumns = columns.stream()
                 .map(PixelsColumnHandle.class::cast).collect(toList());
         PixelsTransactionHandle pixelsTransactionHandle = (PixelsTransactionHandle) transactionHandle;
+        synchronized (this)
+        {
+            if(pixelsTransactionHandle.getTransId() != prevTransId)
+            {
+                logger.info("New TransId: " + pixelsTransactionHandle.getTransId());
+                prevTransId = pixelsTransactionHandle.getTransId();
+            }
+        }
         try
         {
             Storage storage = StorageFactory.Instance().getStorage(pixelsSplit.getStorageScheme());
