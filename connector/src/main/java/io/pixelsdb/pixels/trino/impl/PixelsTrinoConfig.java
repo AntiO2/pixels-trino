@@ -61,6 +61,7 @@ public class PixelsTrinoConfig
 
     private CloudFunctionSwitch cloudFunctionSwitch = CloudFunctionSwitch.AUTO;
     private boolean cleanIntermediateResult = true;
+    private boolean primaryKeyPointLookupEnabled = true;
     /**
      * The storage info of the inputs of Pixels Turbo.
      */
@@ -163,6 +164,13 @@ public class PixelsTrinoConfig
         return this;
     }
 
+    @Config("primary.key.point.lookup.enabled")
+    public PixelsTrinoConfig setPrimaryKeyPointLookupEnabled(boolean primaryKeyPointLookupEnabled)
+    {
+        this.primaryKeyPointLookupEnabled = primaryKeyPointLookupEnabled;
+        return this;
+    }
+
     @NotNull
     public PixelsTrinoConfig.CloudFunctionSwitch getCloudFunctionSwitch()
     {
@@ -172,6 +180,11 @@ public class PixelsTrinoConfig
     public boolean isCleanIntermediateResult()
     {
         return cleanIntermediateResult;
+    }
+
+    public boolean isPrimaryKeyPointLookupEnabled()
+    {
+        return primaryKeyPointLookupEnabled;
     }
 
     public StorageInfo getInputStorageInfo()

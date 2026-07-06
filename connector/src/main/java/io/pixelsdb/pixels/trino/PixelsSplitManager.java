@@ -30,15 +30,13 @@ import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.etcd.jetcd.KeyValue;
 import io.pixelsdb.pixels.cache.PixelsCacheUtil;
-import io.pixelsdb.pixels.common.exception.MainIndexException;
+import io.pixelsdb.pixels.common.exception.IndexException;
 import io.pixelsdb.pixels.common.exception.MetadataException;
 import io.pixelsdb.pixels.common.exception.RetinaException;
-import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
 import io.pixelsdb.pixels.common.index.IndexOption;
+import io.pixelsdb.pixels.common.index.service.IndexService;
+import io.pixelsdb.pixels.common.index.service.IndexServiceProvider;
 import io.pixelsdb.pixels.common.layout.*;
-import io.pixelsdb.pixels.common.index.MainIndex;
-import io.pixelsdb.pixels.common.index.MainIndexFactory;
-import io.pixelsdb.pixels.common.index.SinglePointIndexFactory;
 import io.pixelsdb.pixels.common.metadata.SchemaTableName;
 import io.pixelsdb.pixels.common.metadata.domain.Table;
 import io.pixelsdb.pixels.common.metadata.domain.*;
@@ -466,7 +464,7 @@ public class PixelsSplitManager implements ConnectorSplitManager
                     pixelsSplits = splitsBuilder.build();
                 } else
                 {
-                    List<PixelsFileSplit> pixelsFileSplits = getPrimaryKeySplits(transHandle, session, tableHandle);
+                    List<PixelsFileSplit> pixelsFileSplits = getPrimaryKeySplits(transHandle, tableHandle);
                     if (pixelsFileSplits == null)
                     {
                         pixelsFileSplits = getScanSplits(transHandle, session, tableHandle);
@@ -477,8 +475,7 @@ public class PixelsSplitManager implements ConnectorSplitManager
                             .collect(Collectors.toList());
                 }
 
-                String retinaEnabled = config.getConfigFactory().getProperty("retina.enable");
-                if (retinaEnabled != null && retinaEnabled.equalsIgnoreCase("true"))
+                if (isRetinaEnabled())
                 {
                     List<PixelsBufferSplit> pixelsBufferSplits = getBufferSplits(transHandle, session, tableHandle,
                             pixelsSplits.size());
@@ -1411,10 +1408,15 @@ public class PixelsSplitManager implements ConnectorSplitManager
         return pixelsBufferSplits;
     }
 
-    private List<PixelsFileSplit> getPrimaryKeySplits(PixelsTransactionHandle transHandle, ConnectorSession session,
+    private List<PixelsFileSplit> getPrimaryKeySplits(PixelsTransactionHandle transHandle,
                                                       PixelsTableHandle tableHandle)
             throws MetadataException, IOException, RetinaException
     {
+        if (!config.isPrimaryKeyPointLookupEnabled())
+        {
+            return null;
+        }
+
         TupleDomain<PixelsColumnHandle> constraint = tableHandle.getConstraint();
         if (!constraint.getDomains().isPresent())
         {
@@ -1424,8 +1426,15 @@ public class PixelsSplitManager implements ConnectorSplitManager
         String schemaName = tableHandle.getSchemaName();
         String tableName = tableHandle.getTableName();
         Table table = metadataProxy.getTable(transHandle.getTransId(), schemaName, tableName);
-        io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndex =
-                metadataProxy.getMetadataService().getPrimaryIndex(table.getId());
+        io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndex;
+        try
+        {
+            primaryIndex = metadataProxy.getMetadataService().getPrimaryIndex(table.getId());
+        } catch (MetadataException e)
+        {
+            logger.warn(e, "failed to query primary index metadata, fallback to regular scan");
+            return null;
+        }
         if (primaryIndex == null || !primaryIndex.isPrimary())
         {
             return null;
@@ -1437,28 +1446,57 @@ public class PixelsSplitManager implements ConnectorSplitManager
             return null;
         }
 
-        TypeDescription schema = metadataProxy.getSchema(schemaName, tableName);
+        TypeDescription schema;
+        try
+        {
+            schema = metadataProxy.getSchema(schemaName, tableName);
+        } catch (MetadataException e)
+        {
+            logger.warn(e, "failed to read schema for primary-key point lookup, fallback to regular scan");
+            return null;
+        }
         ByteString indexKeyBytes = buildPrimaryIndexKey(constraint, keyColumnIds, schema);
         if (indexKeyBytes == null)
         {
             return null;
         }
 
-        IndexProto.RowLocation rowLocation = lookupPrimaryKeyRowLocation(table.getId(), primaryIndex, indexKeyBytes);
-        if (rowLocation == null)
+        Optional<IndexProto.RowLocation> rowLocation;
+        try
+        {
+            rowLocation = lookupPrimaryKeyRowLocation(transHandle, table.getId(), primaryIndex, indexKeyBytes);
+        } catch (IndexException e)
+        {
+            logger.warn(e, "failed to lookup primary key row location, fallback to regular scan");
+            return null;
+        }
+        if (rowLocation.isEmpty())
         {
             return ImmutableList.of();
         }
 
-        if (!isRowVisible(transHandle, rowLocation))
+        io.pixelsdb.pixels.common.metadata.domain.File file;
+        String filePath;
+        try
+        {
+            file = metadataProxy.getMetadataService().getFileById(rowLocation.get().getFileId());
+            if (file.getType() == io.pixelsdb.pixels.common.metadata.domain.File.Type.TEMPORARY)
+            {
+                return ImmutableList.of();
+            }
+            filePath = resolveFilePath(tableHandle, file.getPathId(), file);
+        } catch (MetadataException e)
+        {
+            logger.warn(e, "failed to resolve primary-key row file path, fallback to regular scan");
+            return null;
+        }
+
+        if (!isRowVisible(transHandle, rowLocation.get()))
         {
             return ImmutableList.of();
         }
 
         Storage storage = StorageFactory.Instance().getStorage(table.getStorageScheme());
-        io.pixelsdb.pixels.common.metadata.domain.File file =
-                metadataProxy.getMetadataService().getFileById(rowLocation.getFileId());
-        String filePath = resolveFilePath(tableHandle, file.getPathId(), file);
         List<HostAddress> addresses = toHostAddresses(storage.getLocations(filePath));
         List<String> columnOrder = ImmutableList.of();
         List<String> cacheOrder = ImmutableList.of();
@@ -1466,7 +1504,7 @@ public class PixelsSplitManager implements ConnectorSplitManager
                 transHandle.getTransId(), 0L, connectorId,
                 schemaName, tableName, table.getStorageScheme().name(),
                 List.of(filePath),
-                List.of(rowLocation.getRgId()),
+                List.of(rowLocation.get().getRgId()),
                 List.of(1),
                 false, storage.hasLocality(), addresses,
                 columnOrder, cacheOrder,
@@ -1474,36 +1512,40 @@ public class PixelsSplitManager implements ConnectorSplitManager
         return ImmutableList.of(split);
     }
 
-    private IndexProto.RowLocation lookupPrimaryKeyRowLocation(long tableId,
-                                                               io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndex,
-                                                               ByteString indexKeyBytes)
+    private Optional<IndexProto.RowLocation> lookupPrimaryKeyRowLocation(PixelsTransactionHandle transHandle,
+                                                                         long tableId,
+                                                                         io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndex,
+                                                                         ByteString indexKeyBytes)
+            throws IndexException
     {
         int virtualNodeNum = Integer.parseInt(ConfigFactory.Instance().getProperty("node.virtual.num"));
-        try
+        IndexService indexService = IndexServiceProvider.getService(getIndexServiceMode());
+        for (int vNodeId = 0; vNodeId < virtualNodeNum; ++vNodeId)
         {
-            for (int vNodeId = 0; vNodeId < virtualNodeNum; ++vNodeId)
+            IndexProto.IndexKey indexKey = IndexProto.IndexKey.newBuilder()
+                    .setTableId(tableId)
+                    .setIndexId(primaryIndex.getId())
+                    .setKey(indexKeyBytes)
+                    .setTimestamp(transHandle.getTimestamp())
+                    .build();
+            IndexProto.RowLocation rowLocation = indexService.lookupUniqueIndex(
+                    indexKey, IndexOption.builder().vNodeId(vNodeId).build());
+            if (rowLocation != null)
             {
-                IndexProto.IndexKey indexKey = IndexProto.IndexKey.newBuilder()
-                        .setTableId(tableId)
-                        .setIndexId(primaryIndex.getId())
-                        .setKey(indexKeyBytes)
-                        .setTimestamp(Long.MAX_VALUE)
-                        .build();
-                long rowId = SinglePointIndexFactory.Instance()
-                        .getSinglePointIndex(tableId, primaryIndex.getId(), IndexOption.builder().vNodeId(vNodeId).build())
-                        .getUniqueRowId(indexKey);
-                if (rowId >= 0)
-                {
-                    MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
-                    return mainIndex.getLocation(rowId);
-                }
+                return Optional.of(rowLocation);
             }
-            return null;
-        } catch (SinglePointIndexException | MainIndexException e)
-        {
-            throw new TrinoException(PixelsErrorCode.PIXELS_SQL_EXECUTE_ERROR,
-                    "failed to lookup primary key row location", e);
         }
+        return Optional.empty();
+    }
+
+    private IndexServiceProvider.ServiceMode getIndexServiceMode()
+    {
+        String indexServerEnabled = config.getConfigFactory().getProperty("index.server.enabled");
+        if (indexServerEnabled != null && indexServerEnabled.equalsIgnoreCase("true"))
+        {
+            return IndexServiceProvider.ServiceMode.rpc;
+        }
+        return IndexServiceProvider.ServiceMode.local;
     }
 
     private ByteString buildPrimaryIndexKey(TupleDomain<PixelsColumnHandle> constraint,
@@ -1589,8 +1631,7 @@ public class PixelsSplitManager implements ConnectorSplitManager
     private boolean isRowVisible(PixelsTransactionHandle transHandle, IndexProto.RowLocation rowLocation)
             throws RetinaException
     {
-        String retinaEnabled = config.getConfigFactory().getProperty("retina.enable");
-        if (retinaEnabled == null || !retinaEnabled.equalsIgnoreCase("true"))
+        if (!isRetinaEnabled())
         {
             return true;
         }
@@ -1626,6 +1667,12 @@ public class PixelsSplitManager implements ConnectorSplitManager
             return false;
         }
         return (bitmap[wordIndex] & (1L << (offset & 63))) != 0;
+    }
+
+    private boolean isRetinaEnabled()
+    {
+        String retinaEnabled = config.getConfigFactory().getProperty("retina.enable");
+        return retinaEnabled != null && retinaEnabled.equalsIgnoreCase("true");
     }
 
     private String resolveFilePath(PixelsTableHandle tableHandle, long pathId, io.pixelsdb.pixels.common.metadata.domain.File file)
