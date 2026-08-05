@@ -102,6 +102,8 @@ import static java.util.Objects.requireNonNull;
 public class PixelsSplitManager implements ConnectorSplitManager
 {
     private static final Logger logger = Logger.get(PixelsSplitManager.class);
+    private static final String RETINA_ENABLE = "retina.enable";
+    private static final String RETINA_BUFFER_SPLIT_ENABLE = "retina.buffer.split.enable";
     private final String connectorId;
     private final PixelsMetadataProxy metadataProxy;
     private final PixelsTrinoConfig config;
@@ -463,8 +465,7 @@ public class PixelsSplitManager implements ConnectorSplitManager
                             .collect(Collectors.toList());
                 }
 
-                String retinaEnabled = config.getConfigFactory().getProperty("retina.enable");
-                if (retinaEnabled != null && retinaEnabled.equalsIgnoreCase("true"))
+                if (isRetinaBufferSplitEnabled())
                 {
                     List<PixelsBufferSplit> pixelsBufferSplits = getBufferSplits(transHandle, session, tableHandle,
                             pixelsSplits.size());
@@ -1356,6 +1357,18 @@ public class PixelsSplitManager implements ConnectorSplitManager
         return pixelsSplits;
     }
 
+    private boolean isRetinaBufferSplitEnabled()
+    {
+        String retinaEnabled = config.getConfigFactory().getProperty(RETINA_ENABLE);
+        if (!Boolean.parseBoolean(retinaEnabled))
+        {
+            return false;
+        }
+
+        String bufferSplitEnabled = config.getConfigFactory().getProperty(RETINA_BUFFER_SPLIT_ENABLE);
+        return bufferSplitEnabled == null || Boolean.parseBoolean(bufferSplitEnabled);
+    }
+
     private List<PixelsBufferSplit> getBufferSplits(PixelsTransactionHandle transHandle, ConnectorSession session,
                                                     PixelsTableHandle tableHandle, long splitId) throws MetadataException, RetinaException
     {
@@ -1388,18 +1401,15 @@ public class PixelsSplitManager implements ConnectorSplitManager
         {
             HostAddress address = HostAddress.fromString(retinaAddress.getAddress() + ":" + retinaPort);
 
-            for(int virtualNodeId = 0; virtualNodeId < virtualNodeNum; ++virtualNodeId)
-            {
-                PixelsBufferSplit split = new PixelsBufferSplit(transHandle.getTransId(), splitId++, connectorId,
-                        schemaName, tableName, tableId, virtualNodeId,
-                        storageScheme,
-                        List.of(address),
-                        columnOrder, emptyConstraint, // maybe useless
-                        originColumnCnt,
-                        schema.toString()
-                );
-                pixelsBufferSplits.add(split);
-            }
+            PixelsBufferSplit split = new PixelsBufferSplit(transHandle.getTransId(), splitId++, connectorId,
+                    schemaName, tableName, tableId, retinaAddress.getVirtualNodeId(),
+                    storageScheme,
+                    List.of(address),
+                    columnOrder, emptyConstraint, // maybe useless
+                    originColumnCnt,
+                    schema.toString()
+            );
+            pixelsBufferSplits.add(split);
         }
         return pixelsBufferSplits;
     }
