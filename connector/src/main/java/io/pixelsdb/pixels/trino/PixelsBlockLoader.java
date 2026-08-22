@@ -22,7 +22,6 @@ package io.pixelsdb.pixels.trino;
 import io.airlift.slice.Slices;
 import io.pixelsdb.pixels.core.TypeDescription;
 import io.pixelsdb.pixels.core.vector.*;
-import io.pixelsdb.pixels.trino.block.TimeArrayBlock;
 import io.pixelsdb.pixels.trino.block.VarcharArrayBlock;
 import io.pixelsdb.pixels.trino.block.VarcharArrayBlockEncoding;
 import io.trino.spi.block.*;
@@ -70,22 +69,28 @@ final class PixelsBlockLoader
         switch (typeCategory)
         {
             case BYTE:
+                ByteColumnVector bytecv = (ByteColumnVector) vector;
+                block = new ByteArrayBlock(batchSize, getNulls(bytecv), bytecv.vector);
+                break;
             case SHORT:
+                ShortColumnVector shortcv = (ShortColumnVector) vector;
+                block = new ShortArrayBlock(batchSize, getNulls(shortcv), shortcv.vector);
+                break;
             case INT:
                 IntColumnVector icv = (IntColumnVector) vector;
-                block = new IntArrayBlock(batchSize, Optional.ofNullable(icv.isNull), icv.vector);
+                block = new IntArrayBlock(batchSize, getNulls(icv), icv.vector);
                 break;
             case LONG:
                 LongColumnVector lcv = (LongColumnVector) vector;
-                block = new LongArrayBlock(batchSize, Optional.ofNullable(lcv.isNull), lcv.vector);
+                block = new LongArrayBlock(batchSize, getNulls(lcv), lcv.vector);
                 break;
             case DOUBLE:
                 DoubleColumnVector dbcv = (DoubleColumnVector) vector;
-                block = new LongArrayBlock(batchSize, Optional.ofNullable(dbcv.isNull), dbcv.vector);
+                block = new LongArrayBlock(batchSize, getNulls(dbcv), dbcv.vector);
                 break;
             case FLOAT:
                 FloatColumnVector dfcv = (FloatColumnVector) vector;
-                block = new IntArrayBlock(batchSize, Optional.ofNullable(dfcv.isNull), dfcv.vector);
+                block = new IntArrayBlock(batchSize, getNulls(dfcv), dfcv.vector);
                 break;
             case DECIMAL:
                 /**
@@ -95,11 +100,11 @@ final class PixelsBlockLoader
                  */
                 if (vector instanceof DecimalColumnVector dccv)
                 {
-                    block = new LongArrayBlock(batchSize, Optional.ofNullable(dccv.isNull), dccv.vector);
+                    block = new LongArrayBlock(batchSize, getNulls(dccv), dccv.vector);
                 } else
                 {
                     LongDecimalColumnVector ldccv = (LongDecimalColumnVector) vector;
-                    block = new Int128ArrayBlock(batchSize, Optional.ofNullable(ldccv.isNull), ldccv.vector);
+                    block = new Int128ArrayBlock(batchSize, getNulls(ldccv), ldccv.vector);
                 }
                 break;
             case CHAR:
@@ -110,9 +115,12 @@ final class PixelsBlockLoader
                 if (vector instanceof BinaryColumnVector scv)
                 {
                     block = VarcharArrayBlockEncoding.Instance()
-                            .replacementBlockForWrite(new VarcharArrayBlock(batchSize, scv.vector, scv.start, scv.lens, !scv.noNulls, scv.isNull).getLoadedBlock())
-                            .get();
-                } else
+                            .replacementBlockForWrite(new VarcharArrayBlock(
+                                    batchSize, scv.vector, scv.start, scv.lens, !scv.noNulls, scv.isNull)
+                                    .getLoadedBlock())
+                            .orElseThrow();
+                }
+                else
                 {
                     DictionaryColumnVector dscv = (DictionaryColumnVector) vector;
                     Block dictionary = new VariableWidthBlock(dscv.dictOffsets.length - 1,
@@ -135,23 +143,18 @@ final class PixelsBlockLoader
                 break;
             case BOOLEAN:
                 ByteColumnVector bcv = (ByteColumnVector) vector;
-                block = new ByteArrayBlock(batchSize, Optional.ofNullable(bcv.isNull), bcv.vector);
+                block = new ByteArrayBlock(batchSize, getNulls(bcv), bcv.vector);
                 break;
             case DATE:
                 // PIXELS-94: add date type.
                 DateColumnVector dtcv = (DateColumnVector) vector;
                 // In pixels and Presto, date is stored as the number of days from UTC 1970-1-1 0:0:0.
-                block = new IntArrayBlock(batchSize, Optional.ofNullable(dtcv.isNull), dtcv.dates);
+                block = new IntArrayBlock(batchSize, getNulls(dtcv), dtcv.dates);
                 break;
             case TIME:
-                // PIXELS-94: add time type.
-                TimeColumnVector tcv = (TimeColumnVector) vector;
-                /**
-                 * In Presto, LongArrayBlock is used for time type. However, in Pixels,
-                 * Time value is stored as int, so here we use TimeArrayBlock, which
-                 * accepts int values but provides getLong method same as LongArrayBlock.
-                 */
-                block = new TimeArrayBlock(batchSize, tcv.times, !tcv.noNulls, tcv.isNull);
+                // TIME is read as LongTimeColumnVector (picoseconds of day) for zero-copy LongArrayBlock.
+                LongTimeColumnVector tcv = (LongTimeColumnVector) vector;
+                block = new LongArrayBlock(batchSize, getNulls(tcv), tcv.vector);
                 break;
             case TIMESTAMP:
                 TimestampColumnVector tscv = (TimestampColumnVector) vector;
@@ -163,7 +166,7 @@ final class PixelsBlockLoader
                  * io.trino.spi.type.AbstractLongType, which creates a LongArrayBlockBuilder.
                  * And this block builder builds a LongArrayBlock.
                  */
-                block = new LongArrayBlock(batchSize, Optional.ofNullable(tscv.isNull), tscv.times);
+                block = new LongArrayBlock(batchSize, getNulls(tscv), tscv.times);
                 break;
             case VECTOR:
                 VectorColumnVector vcv = (VectorColumnVector) vector;
@@ -185,7 +188,8 @@ final class PixelsBlockLoader
                 // an int[] as offsets to tell trino where each array begins and ends. Note that the final offset
                 // should be the position to tell trino the end of the final array
                 // Interestingly all the above is NOT documented in trino documentation or code at all.
-                block = ArrayBlock.fromElementBlock(batchSize, Optional.of(vcv.isNull), offsets, allDoublesBuilder.build());
+                block = ArrayBlock.fromElementBlock(
+                        batchSize, getNulls(vcv), offsets, allDoublesBuilder.build());
                 break;
             default:
                 BlockBuilder blockBuilder = type.createBlockBuilder(null, batchSize);
@@ -198,5 +202,10 @@ final class PixelsBlockLoader
         }
 
         return block;
+    }
+
+    private static Optional<boolean[]> getNulls(ColumnVector vector)
+    {
+        return vector.noNulls ? Optional.empty() : Optional.of(vector.isNull);
     }
 }

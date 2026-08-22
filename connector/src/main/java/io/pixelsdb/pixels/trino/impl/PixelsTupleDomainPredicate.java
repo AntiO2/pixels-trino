@@ -36,6 +36,7 @@ import java.util.Optional;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.pixelsdb.pixels.core.utils.DatetimeUtils.PICOS_PER_MILLIS;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static java.util.Objects.requireNonNull;
 
@@ -301,7 +302,8 @@ public class PixelsTupleDomainPredicate<C> implements PixelsPredicate
             /**
              * PIXELS-103: add Time type predicate.
              */
-            return createDomain(type, hasNullValue, (TimeColumnStats) columnStats);
+            return createDomain(type, hasNullValue, (TimeColumnStats) columnStats,
+                    millis -> (long) millis * PICOS_PER_MILLIS);
         }
         else if (type.getJavaType() == Int128.class)
         {
