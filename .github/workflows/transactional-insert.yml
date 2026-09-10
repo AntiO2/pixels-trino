@@ -35,7 +35,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p verification "$PIXELS_HOME/lib" "$PIXELS_HOME/etc"
-          touch verification/build-start
           cp pixels/pixels-common/src/main/resources/pixels.properties "$PIXELS_HOME/etc/"
           git -C pixels rev-parse HEAD > verification/pixels.commit
           git -C pixels-trino rev-parse HEAD > verification/pixels-trino.commit
@@ -44,14 +43,6 @@ jobs:
         run: |
           set -euo pipefail
           mvn -B -ntp -f pixels/pom.xml -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 -am -Dmaven.test.skip=true -Dmaven.source.skip=true install 2>&1 | tee verification/pixels-build.log
-      - name: Preserve Java 8 and native test inputs
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -czf verification/java8.tar.gz -C "$JAVA_HOME" .
-          tar -czf verification/native-libs.tar.gz -C "$PIXELS_HOME" lib
-          if [ -d pixels/cpp/pixels-retina/build ]; then tar -czf verification/native-build-inputs.tar.gz -C pixels/cpp/pixels-retina build; fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -62,21 +53,21 @@ jobs:
           set -euo pipefail
           bash pixels/tools/verify-ingest-contract.sh
           bash pixels-trino/tools/verify-ingest-contract.sh "$PWD/pixels"
-      - name: Compile Trino and run writer tests
+      - name: Compile Trino and resolve JUnit provider
         shell: bash
         run: |
           set -euo pipefail
           mvn -B -ntp -f pixels-trino/pom.xml -DskipTests=false -Dtest=TestPixelsMutationWriter -Dsurefire.failIfNoSpecifiedTests=false test 2>&1 | tee verification/trino-build.log
-      - name: Preserve additional dependency inputs
+          mvn -B -ntp -f pixels/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:get -Dartifact=org.apache.maven.surefire:surefire-junit-platform:2.22.2
+      - name: Preserve external dependency inputs
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          find "$HOME/.m2/repository" -type f -newer verification/build-start -print0 > verification/new-files
-          tar --null -T verification/new-files -czf verification/maven-new-files.tar.gz
+          tar --exclude=repository/io/pixelsdb -czf verification/external-maven.tar.gz -C "$HOME/.m2" repository
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: additional-build-inputs
+          name: external-build-inputs
           path: verification/
           retention-days: 1
