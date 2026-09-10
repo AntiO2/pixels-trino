@@ -39,12 +39,6 @@ jobs:
           cp pixels/pixels-common/src/main/resources/pixels.properties "$PIXELS_HOME/etc/"
           git -C pixels rev-parse HEAD > verification/pixels.commit
           git -C pixels-trino rev-parse HEAD > verification/pixels-trino.commit
-      - name: Verify staging contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash pixels/tools/verify-ingest-contract.sh
-          bash pixels-trino/tools/verify-ingest-contract.sh "$PWD/pixels"
       - name: Build Pixels dependencies
         shell: bash
         run: |
@@ -62,6 +56,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '23'
+      - name: Verify staging contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash pixels/tools/verify-ingest-contract.sh
+          bash pixels-trino/tools/verify-ingest-contract.sh "$PWD/pixels"
       - name: Compile Trino and run writer tests
         shell: bash
         run: |
