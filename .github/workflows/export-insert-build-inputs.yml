@@ -1,0 +1,60 @@
+name: Export INSERT build inputs
+on:
+  push:
+    branches: [feat/trino-insert-180]
+    paths: [.github/workflows/export-insert-build-inputs.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          repository: AntiO2/pixels-trino
+          run-id: 34460803720
+          github-token: ${{ github.token }}
+          name: compilation-diagnostics
+          path: inputs
+      - run: |
+          mkdir -p parts
+          tar -cf - -C inputs . | split -b 200M -d - parts/build-inputs-
+          ls -lh parts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-inputs-00
+          path: parts/build-inputs-00
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-inputs-01
+          path: parts/build-inputs-01
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-inputs-02
+          path: parts/build-inputs-02
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-inputs-03
+          path: parts/build-inputs-03
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-inputs-04
+          path: parts/build-inputs-04
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-inputs-05
+          path: parts/build-inputs-05
+          retention-days: 1
+          compression-level: 0
