@@ -1,0 +1,51 @@
+name: Transactional INSERT
+
+on:
+  push:
+    branches: [feat/trino-insert-180]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transactional-insert-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pixels-trino
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: AntiO2/pixels
+          ref: feat/trino-insert-180
+          path: pixels
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+      - name: Verify ingest contracts
+        run: |
+          bash pixels/tools/verify-ingest-contract.sh
+          bash pixels-trino/tools/verify-ingest-contract.sh "$PWD/pixels"
+      - name: Record exact tested sources
+        if: always()
+        run: |
+          mkdir -p verification
+          git -C pixels rev-parse HEAD > verification/pixels.commit
+          git -C pixels-trino rev-parse HEAD > verification/pixels-trino.commit
+          git -C pixels archive --format=tar --prefix=pixels/ HEAD | gzip > verification/pixels-source.tar.gz
+          git -C pixels-trino archive --format=tar --prefix=pixels-trino/ HEAD | gzip > verification/pixels-trino-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tested-source-snapshots
+          path: verification/
+          retention-days: 7
