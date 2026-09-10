@@ -11,7 +11,7 @@
     </parent>
     <groupId>io.pixelsdb.testing</groupId>
     <artifactId>pixels-insert-sql-runtime</artifactId>
-    <version>1</version>
+    <!-- Inherit 466: trino-root manages its modules using ${project.version}. -->
     <dependencies>
         <dependency>
             <groupId>io.trino</groupId>
