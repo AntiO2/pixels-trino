@@ -49,3 +49,51 @@ jobs:
           name: tested-source-snapshots
           path: verification/
           retention-days: 7
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PIXELS_HOME: ${{ github.workspace }}/pixels-home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pixels-trino
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: AntiO2/pixels
+          ref: feat/trino-insert-180
+          path: pixels
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+      - name: Build Pixels dependencies
+        run: |
+          mkdir -p "$PIXELS_HOME/lib" "$PIXELS_HOME/etc" verification
+          cp pixels/pixels-common/src/main/resources/pixels.properties "$PIXELS_HOME/etc/"
+          mvn -B -ntp -f pixels/pom.xml -pl pixels-daemon,pixels-cache,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 -am -Dmaven.test.skip=true -Dmaven.source.skip=true install 2>&1 | tee verification/pixels-build.log
+      - uses: actions/setup-java@v4
+        if: always()
+        with:
+          distribution: temurin
+          java-version: '23'
+      - name: Compile Trino and run writer tests
+        run: |
+          mvn -B -ntp -f pixels-trino/pom.xml -DskipTests=false -Dtest=TestPixelsMutationWriter -Dsurefire.failIfNoSpecifiedTests=false test 2>&1 | tee verification/trino-build.log
+      - name: Collect reproducible build inputs
+        if: always()
+        run: |
+          mkdir -p verification
+          tar -czf verification/maven-repository.tar.gz -C "$HOME/.m2" repository
+          tar -czf verification/java23.tar.gz -C "$JAVA_HOME" .
+          tar -czf verification/maven-tools.tar.gz -C "$(dirname "$(dirname "$(readlink -f "$(command -v mvn)")")")" .
+          find pixels pixels-trino -type d -path '*/target' -prune -print0 | tar --null -T - -czf verification/build-targets.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compilation-diagnostics
+          path: verification/
+          retention-days: 3
