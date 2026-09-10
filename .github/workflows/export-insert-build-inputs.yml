@@ -4,57 +4,30 @@ on:
     branches: [feat/trino-insert-180]
     paths: [.github/workflows/export-insert-build-inputs.yml]
 permissions:
-  actions: read
   contents: read
 jobs:
   export:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          repository: AntiO2/pixels-trino
-          run-id: 34460803720
-          github-token: ${{ github.token }}
-          name: compilation-diagnostics
-          path: inputs
-      - run: |
-          mkdir -p parts
-          tar -cf - -C inputs . | split -b 200M -d - parts/build-inputs-
-          ls -lh parts
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+      - name: Resolve engine classpath
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          mvn -B -ntp -f tools/ingest-contract/sql-runtime/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:build-classpath -Dmdep.outputFile="$PWD/verification/engine.cp"
+          mvn -B -ntp -f tools/ingest-contract/sql-runtime/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:get -Dartifact=org.slf4j:slf4j-api:2.0.16
+          tar -czf verification/engine-maven.tar.gz -C "$HOME/.m2" repository
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: build-inputs-00
-          path: parts/build-inputs-00
+          name: engine-build-inputs
+          path: verification/
           retention-days: 1
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-inputs-01
-          path: parts/build-inputs-01
-          retention-days: 1
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-inputs-02
-          path: parts/build-inputs-02
-          retention-days: 1
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-inputs-03
-          path: parts/build-inputs-03
-          retention-days: 1
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-inputs-04
-          path: parts/build-inputs-04
-          retention-days: 1
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-inputs-05
-          path: parts/build-inputs-05
-          retention-days: 1
-          compression-level: 0
