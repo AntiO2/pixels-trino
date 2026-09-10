@@ -27,6 +27,13 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 
 public class PixelsTransactionHandle implements ConnectorTransactionHandle
 {
+    private boolean autoCommit;
+    private java.util.Map<String, String> ingestReadTokens = java.util.Map.of();
+    @JsonProperty public boolean isAutoCommit() { return autoCommit; }
+    @JsonProperty public void setAutoCommit(boolean value) { autoCommit = value; }
+    @JsonProperty public java.util.Map<String, String> getIngestReadTokens() { return ingestReadTokens; }
+    @JsonProperty public void setIngestReadTokens(java.util.Map<String, String> tokens) { ingestReadTokens = java.util.Map.copyOf(tokens); }
+
     /**
      * transId is the transaction id of the query, which is a single-statement read-only transaction.
      */

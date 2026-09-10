@@ -48,6 +48,7 @@ public class PixelsPageSourceProvider implements ConnectorPageSourceProvider
 {
     private static final Logger logger = Logger.get(PixelsPageSourceProvider.class);
 
+    private final io.pixelsdb.pixels.trino.write.PixelsIngestTransactions ingest;
     private final String connectorId;
     private final List<MemoryMappedFile> cacheFiles;
     private final List<MemoryMappedFile> indexFiles;
@@ -56,9 +57,10 @@ public class PixelsPageSourceProvider implements ConnectorPageSourceProvider
     private final PixelsTrinoConfig config;
 
     @Inject
-    public PixelsPageSourceProvider(PixelsConnectorId connectorId, PixelsTrinoConfig config)
+    public PixelsPageSourceProvider(PixelsConnectorId connectorId, PixelsTrinoConfig config, io.pixelsdb.pixels.trino.write.PixelsIngestTransactions ingest)
             throws Exception
     {
+        this.ingest = ingest;
         this.connectorId = requireNonNull(connectorId, "connectorId is null").toString();
         this.config = requireNonNull(config, "config is null");
         if (config.getConfigFactory().getProperty("cache.enabled").equalsIgnoreCase("true"))
@@ -102,6 +104,17 @@ public class PixelsPageSourceProvider implements ConnectorPageSourceProvider
         List<PixelsColumnHandle> pixelsColumns = columns.stream()
                 .map(PixelsColumnHandle.class::cast).collect(toList());
         PixelsTransactionHandle pixelsTransactionHandle = (PixelsTransactionHandle) transactionHandle;
+        if (ingest.enabled())
+        {
+            for (java.util.Map.Entry<String, String> token : pixelsTransactionHandle.getIngestReadTokens().entrySet())
+            {
+                ingest.client().participant(token.getKey()).renewRead(io.pixelsdb.pixels.ingest.IngestProto.ReadPin.newBuilder()
+                        .setTransactionId(pixelsTransactionHandle.getTransId()).setReadTimestamp(pixelsTransactionHandle.getTimestamp())
+                        .setToken(token.getValue()).build());
+            }
+            if (pixelsTransactionHandle.getIngestReadTokens().isEmpty())
+            { throw new TrinoException(io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR, "Missing pinned Retina read view"); }
+        }
         try
         {
             Storage storage = StorageFactory.Instance().getStorage(pixelsSplit.getStorageScheme());

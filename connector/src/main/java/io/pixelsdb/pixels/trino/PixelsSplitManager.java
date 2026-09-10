@@ -129,7 +129,8 @@ public class PixelsSplitManager implements ConnectorSplitManager
         this.cacheEnabled = Boolean.parseBoolean(cacheEnabled);
         this.projectionReadEnabled = Boolean.parseBoolean(projectionReadEnabled);
         this.multiSplitForOrdered = Boolean.parseBoolean(multiSplit);
-        KeyValue keyValue = EtcdUtil.Instance().getKeyValue(Constants.LAYOUT_VERSION_LITERAL);
+        // A disabled cache must not require the cache coordinator to be available.
+        KeyValue keyValue = this.cacheEnabled ? EtcdUtil.Instance().getKeyValue(Constants.LAYOUT_VERSION_LITERAL) : null;
         if (keyValue != null)
         {
             String value = keyValue.getValue().toString(StandardCharsets.UTF_8);
@@ -1042,6 +1043,7 @@ public class PixelsSplitManager implements ConnectorSplitManager
          * this.cacheSchema and this.cacheTable are not null if this.cacheEnabled == true.
          */
         boolean usingCache = false;
+        if (cacheEnabled)
         {
             KeyValue keyValue = EtcdUtil.Instance().getKeyValue(Constants.LAYOUT_VERSION_LITERAL);
             if (keyValue != null)
