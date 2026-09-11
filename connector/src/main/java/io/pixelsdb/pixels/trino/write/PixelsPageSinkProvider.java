@@ -23,9 +23,15 @@ import static io.trino.spi.StandardErrorCode.*;
 
 import com.google.inject.Inject;
 
+import io.pixelsdb.pixels.ingest.IngestProto.AllocateWriterRequest;
+import io.pixelsdb.pixels.ingest.IngestProto.WriterAssignment;
+
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
 import io.trino.spi.type.TypeManager;
+
+import java.io.IOException;
+import java.util.UUID;
 
 /** Worker-local sinks over the shared ingestion transport. */
 public final class PixelsPageSinkProvider implements ConnectorPageSinkProvider {
@@ -53,9 +59,23 @@ public final class PixelsPageSinkProvider implements ConnectorPageSinkProvider {
             ConnectorPageSinkId id) {
         try {
             PixelsInsertTableHandle handle = (PixelsInsertTableHandle) input;
+            // Trino 466 derives PageSinkId from TaskId; parallel writer operators
+            // in one task need separate ingestion streams and sequence spaces.
+            AllocateWriterRequest request =
+                    AllocateWriterRequest.newBuilder()
+                            .setTransactionId(handle.getTransactionId())
+                            .setTaskId(id.getId())
+                            .setRequestId(UUID.randomUUID().toString())
+                            .build();
+            WriterAssignment writer = ingest.client().coordinator().allocateWriter(request);
+            if (writer.getWriterId() <= 0
+                    || writer.getTaskId() != request.getTaskId()
+                    || !writer.getRequestId().equals(request.getRequestId())) {
+                throw new IOException("Invalid ingestion writer assignment");
+            }
             return new PixelsInsertPageSink(
                     handle,
-                    id.getId(),
+                    writer.getWriterId(),
                     types,
                     ingest.client().transport(handle.decodeTable()),
                     ingest.options());

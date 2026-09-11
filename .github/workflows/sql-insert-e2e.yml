@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: babcf1dc729eed0ac7f1612977910cf70eb46ce9
+          ref: 6a0da82b30737c0653f4ace88c6508f42dbef7ab
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -53,14 +53,17 @@ jobs:
           cache-dependency-path: |
             pixels/**/pom.xml
             pixels-trino/**/pom.xml
-      - name: Build Pixels and compile the backend fixture
+      - name: Build Pixels and run writer allocation regressions
         shell: bash
         run: |
           set -euo pipefail
           mvn -B -ntp -f pixels/pom.xml \
             -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
-            -am -DskipTests=true -Dmaven.source.skip=true install \
+            -am -DskipTests=false -Dtest=TestIngestWriterAllocation \
+            -Dsurefire.failIfNoSpecifiedTests=false -Dmaven.source.skip=true install \
             2>&1 | tee verification/pixels-build.log
+          mkdir -p verification/unit-tests
+          cp pixels/pixels-daemon/target/surefire-reports/*TestIngestWriterAllocation* verification/unit-tests/
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -111,6 +114,7 @@ jobs:
           path: |
             verification/*.commit
             verification/*.log
+            verification/unit-tests/*
             verification/sql/*.log
             verification/sql/exit-code
             verification/sql/status.properties
