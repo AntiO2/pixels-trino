@@ -55,9 +55,12 @@ javac -cp "$(cat "$WORK/engine.cp")" -d "$WORK/driver-classes" \
     "$TRINO/tools/ingest-contract/sql-runtime/src/main/java/io/pixelsdb/pixels/trino/testing/FullSqlInsert.java"
 
 export LD_LIBRARY_PATH="$PIXELS_HOME/lib:${LD_LIBRARY_PATH:-}"
-# Retina loads its linked native dependencies through JNI. Do not replace the
-# allocator of the entire JVM (and every helper process) here. An explicitly
-# configured LD_PRELOAD remains the caller's responsibility.
+# Jemalloc-enabled Retina uses a process-wide allocator. Scope interposition to
+# the backend JVM, rather than injecting it into Trino and shell helper tools.
+BACKEND_ENV=(env)
+if [[ -f "$PIXELS_HOME/lib/libjemalloc.so.2" ]]; then
+    BACKEND_ENV+=("LD_PRELOAD=$PIXELS_HOME/lib/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}")
+fi
 JAVA_ARGS=(-XX:ActiveProcessorCount=4 --enable-native-access=ALL-UNNAMED
     "-XX:ErrorFile=$WORK/hs_err_pid%p.log"
     --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED)
@@ -65,30 +68,40 @@ BACKEND_PID=''
 cleanup() {
     local result=$?
     trap - EXIT
-    printf '%s\n' "$result" > "$WORK/exit-code"
     touch "$WORK/stop"
     if [[ -n "$BACKEND_PID" ]]; then
-        for _ in $(seq 1 50); do
+        for _ in $(seq 1 100); do
             kill -0 "$BACKEND_PID" 2>/dev/null || break
             sleep .1
         done
-        kill "$BACKEND_PID" 2>/dev/null || true
-        sleep .1
-        kill -KILL "$BACKEND_PID" 2>/dev/null || true
-        wait "$BACKEND_PID" 2>/dev/null || true
+        if kill -0 "$BACKEND_PID" 2>/dev/null; then
+            echo "Backend did not stop after fixture cleanup" >&2
+            [[ "$result" != 0 ]] || result=1
+            kill "$BACKEND_PID" 2>/dev/null || true
+            sleep .1
+            kill -KILL "$BACKEND_PID" 2>/dev/null || true
+        fi
+        if wait "$BACKEND_PID"; then
+            :
+        else
+            local backend_result=$?
+            echo "Backend exited with status $backend_result" >&2
+            [[ "$result" != 0 ]] || result=$backend_result
+        fi
     fi
     if [[ "$result" != 0 ]]; then
         tail -80 "$WORK/sql.log" 2>/dev/null || true
         tail -30 "$WORK/backend.log" 2>/dev/null || true
         tail -30 "$WORK/runtime.log" 2>/dev/null || true
     fi
+    printf '%s\n' "$result" > "$WORK/exit-code"
     printf 'SQL verification exit=%s evidence=%s\n' "$result" "$WORK"
     exit "$result"
 }
 trap cleanup EXIT
 
 # Capture failures that occur before the backend reaches its Java main method.
-java "${JAVA_ARGS[@]}" -version > "$WORK/runtime.log" 2>&1
+"${BACKEND_ENV[@]}" java "${JAVA_ARGS[@]}" -version > "$WORK/runtime.log" 2>&1
 {
     printf '\nRetina native dependencies:\n'
     ldd "$PIXELS_HOME/lib/libpixels-retina.so"
@@ -96,7 +109,7 @@ java "${JAVA_ARGS[@]}" -version > "$WORK/runtime.log" 2>&1
 
 # The backend is a separate process with its own dependency graph. Only the
 # catalog, node directory and external ID source are fixtures; writes are real.
-java "${JAVA_ARGS[@]}" -Xmx1g -cp "$(cat "$WORK/backend.cp")" \
+"${BACKEND_ENV[@]}" java "${JAVA_ARGS[@]}" -Xmx1g -cp "$(cat "$WORK/backend.cp")" \
     io.pixelsdb.pixels.daemon.transaction.ingest.SqlIngestFixtureMain "$WORK" > "$WORK/backend.log" 2>&1 &
 BACKEND_PID=$!
 for _ in $(seq 1 300); do
@@ -110,4 +123,4 @@ timeout -k 10s 180s java "${JAVA_ARGS[@]}" -Xmx3g \
     -cp "$WORK/driver-classes:$(cat "$WORK/engine.cp")" \
     io.pixelsdb.pixels.trino.testing.FullSqlInsert "$WORK" "$WORK/plugin.cp" > "$WORK/sql.log" 2>&1
 cat "$WORK/sql.log"
-grep -q 'FULL_SQL_INSERT_E2E_PASS' "$WORK/sql.log"
+grep -Eq '(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=1008 trinoWorkers=2( |$)' "$WORK/sql.log"

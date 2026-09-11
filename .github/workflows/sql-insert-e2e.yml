@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: 67bcf6e032782d4ac974999edc88f5204e6b7eb4
+          ref: babcf1dc729eed0ac7f1612977910cf70eb46ce9
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -81,7 +81,9 @@ jobs:
           bash pixels-trino/tools/verify-sql-insert.sh "$PWD/pixels" -ntp \
             2>&1 | tee verification/full-sql.log
           test "$(cat "$SQL_E2E_WORK_DIR/exit-code")" = 0
-          grep -q '^FULL_SQL_INSERT_E2E_PASS ' "$SQL_E2E_WORK_DIR/sql.log"
+          grep -Eq '(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=1008 trinoWorkers=2( |$)' "$SQL_E2E_WORK_DIR/sql.log"
+          grep -q '^PIXELS_NATIVE_VISIBILITY_PASS iterations=1000$' "$SQL_E2E_WORK_DIR/backend.log"
+          grep -q '^PIXELS_SQL_FIXTURE_STOPPED$' "$SQL_E2E_WORK_DIR/backend.log"
       - name: Record SQL verification summary
         if: always()
         shell: bash
@@ -94,7 +96,7 @@ jobs:
             echo
             echo '```text'
             if test -f "$SQL_E2E_WORK_DIR/sql.log"; then
-              grep -E '^(SQL_PASS |SQL_EXPECTED_REJECTION |FULL_SQL_INSERT_E2E_PASS )' "$SQL_E2E_WORK_DIR/sql.log" || true
+              grep -E '(^|[[:space:]])(SQL_PASS |SQL_EXPECTED_REJECTION |FULL_SQL_INSERT_E2E_PASS )' "$SQL_E2E_WORK_DIR/sql.log" || true
             else
               echo 'SQL execution was not reached; inspect build logs.'
             fi
