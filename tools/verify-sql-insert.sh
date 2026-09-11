@@ -55,10 +55,11 @@ javac -cp "$(cat "$WORK/engine.cp")" -d "$WORK/driver-classes" \
     "$TRINO/tools/ingest-contract/sql-runtime/src/main/java/io/pixelsdb/pixels/trino/testing/FullSqlInsert.java"
 
 export LD_LIBRARY_PATH="$PIXELS_HOME/lib:${LD_LIBRARY_PATH:-}"
-if [[ -f "$PIXELS_HOME/lib/libjemalloc.so.2" ]]; then
-    export LD_PRELOAD="$PIXELS_HOME/lib/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
+# Retina loads its linked native dependencies through JNI. Do not replace the
+# allocator of the entire JVM (and every helper process) here. An explicitly
+# configured LD_PRELOAD remains the caller's responsibility.
 JAVA_ARGS=(-XX:ActiveProcessorCount=4 --enable-native-access=ALL-UNNAMED
+    "-XX:ErrorFile=$WORK/hs_err_pid%p.log"
     --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED)
 BACKEND_PID=''
 cleanup() {
@@ -79,11 +80,19 @@ cleanup() {
     if [[ "$result" != 0 ]]; then
         tail -80 "$WORK/sql.log" 2>/dev/null || true
         tail -30 "$WORK/backend.log" 2>/dev/null || true
+        tail -30 "$WORK/runtime.log" 2>/dev/null || true
     fi
     printf 'SQL verification exit=%s evidence=%s\n' "$result" "$WORK"
     exit "$result"
 }
 trap cleanup EXIT
+
+# Capture failures that occur before the backend reaches its Java main method.
+java "${JAVA_ARGS[@]}" -version > "$WORK/runtime.log" 2>&1
+{
+    printf '\nRetina native dependencies:\n'
+    ldd "$PIXELS_HOME/lib/libpixels-retina.so"
+} >> "$WORK/runtime.log" 2>&1
 
 # The backend is a separate process with its own dependency graph. Only the
 # catalog, node directory and external ID source are fixtures; writes are real.
