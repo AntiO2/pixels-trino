@@ -1,0 +1,129 @@
+name: Full SQL INSERT
+
+on:
+  push:
+    branches: [feat/trino-insert-180]
+    paths:
+      - 'connector/**'
+      - 'tools/verify-sql-insert.sh'
+      - 'tools/ingest-contract/sql-runtime/**'
+      - '.github/workflows/sql-insert-e2e.yml'
+      - 'pom.xml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sql-insert-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-sql:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PIXELS_HOME: ${{ github.workspace }}/pixels-home
+      SQL_E2E_WORK_DIR: ${{ github.workspace }}/verification/sql
+      SQL_E2E_SKIP_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pixels-trino
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: AntiO2/pixels
+          ref: 67bcf6e032782d4ac974999edc88f5204e6b7eb4
+          path: pixels
+          persist-credentials: false
+      - name: Record exact source versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verification "$PIXELS_HOME/lib" "$PIXELS_HOME/etc"
+          cp pixels/pixels-common/src/main/resources/pixels.properties "$PIXELS_HOME/etc/"
+          git -C pixels rev-parse HEAD > verification/pixels.commit
+          git -C pixels-trino rev-parse HEAD > verification/pixels-trino.commit
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+          cache-dependency-path: |
+            pixels/**/pom.xml
+            pixels-trino/**/pom.xml
+      - name: Build Pixels and compile the backend fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mvn -B -ntp -f pixels/pom.xml \
+            -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
+            -am -DskipTests=true -Dmaven.source.skip=true install \
+            2>&1 | tee verification/pixels-build.log
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+      - name: Build the connector and run writer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash pixels/tools/verify-ingest-contract.sh
+          bash pixels-trino/tools/verify-ingest-contract.sh "$PWD/pixels"
+          mvn -B -ntp -f pixels-trino/pom.xml -DskipTests=false \
+            -Dtest=TestPixelsMutationWriter -Dsurefire.failIfNoSpecifiedTests=false test \
+            2>&1 | tee verification/trino-build.log
+      - name: Execute full SQL INSERT against Retina
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash pixels-trino/tools/verify-sql-insert.sh "$PWD/pixels" -ntp \
+            2>&1 | tee verification/full-sql.log
+          test "$(cat "$SQL_E2E_WORK_DIR/exit-code")" = 0
+          grep -q '^FULL_SQL_INSERT_E2E_PASS ' "$SQL_E2E_WORK_DIR/sql.log"
+      - name: Record SQL verification summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Full SQL INSERT verification'
+            echo
+            echo "Pixels: $(cat verification/pixels.commit)"
+            echo "Pixels-Trino: $(cat verification/pixels-trino.commit)"
+            echo
+            echo '```text'
+            if test -f "$SQL_E2E_WORK_DIR/sql.log"; then
+              grep -E '^(SQL_PASS |SQL_EXPECTED_REJECTION |FULL_SQL_INSERT_E2E_PASS )' "$SQL_E2E_WORK_DIR/sql.log" || true
+            else
+              echo 'SQL execution was not reached; inspect build logs.'
+            fi
+            echo '```'
+            echo
+            echo 'Catalog, node directory, and external ID allocation are fixtures. SQL execution, connector, TCP/gRPC, journals, Retina buffers, MainIndex, visibility, and file reads/writes are real.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sql-insert-e2e-evidence
+          path: |
+            verification/*.commit
+            verification/*.log
+            verification/sql/*.log
+            verification/sql/exit-code
+            verification/sql/status.properties
+          retention-days: 7
+          if-no-files-found: error
+      - name: Archive exact tested sources
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p source-snapshots
+          git -C pixels archive --format=tar --prefix=pixels/ HEAD | gzip > source-snapshots/pixels.tar.gz
+          git -C pixels-trino archive --format=tar --prefix=pixels-trino/ HEAD | gzip > source-snapshots/pixels-trino.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sql-insert-e2e-sources
+          path: source-snapshots/
+          retention-days: 3
