@@ -170,13 +170,18 @@ then recovers both PUBLISHED decisions, reaches READY, shuts down, and reads the
 Pixels files directly to prove an exact 65-row multiset without replay duplicates.
 It finally corrupts a copied committed-decision state and removes the published
 checkpoint body in turn; separate daemon attempts must fail before READY with an
-actionable checksum or missing-body error. Catalog persistence and topology
-discovery remain fixtures.
+actionable checksum or missing-body error. An offline cutover phase first proves
+that a transaction allocator below the configured baseline is rejected. It then
+advances the isolated etcd ID domain while services are stopped, preserves all
+65 old physical rows, commits one new row above baseline 1000000000, and rechecks
+the legacy mutation fence. Catalog persistence and topology discovery remain
+fixtures.
 
 ~~~text
 PIXELS_NORMAL_INGEST_DAEMON_PHASE1_PASS rows=65 checkpointedTransaction=1
 PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2
-PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1
+PIXELS_NORMAL_INGEST_CUTOVER_PASS oldRows=65 totalRows=66 baseline=1000000000 commitTimestamp=1000000002 legacyFence=1
+PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1 allocatorFloor=1
 ~~~
 
 ### Full SQL end-to-end

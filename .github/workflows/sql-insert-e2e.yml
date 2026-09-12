@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: c848af9a5bc47fa4fcb85b7f9ee7b3906d091d66
+          ref: e5d54f27a7f4a20442152441773f164e3d2d7976
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -95,7 +95,9 @@ jobs:
             2>&1 | tee verification/normal-daemon.log
           grep -q '^PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2$' \
             "$INGEST_DAEMON_WORK_DIR/daemon.log"
-          grep -q '^PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1$' \
+          grep -Eq '^PIXELS_NORMAL_INGEST_CUTOVER_PASS oldRows=65 totalRows=66 baseline=1000000000 commitTimestamp=[0-9]+ legacyFence=1$' \
+            verification/normal-daemon.log
+          grep -q '^PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1 allocatorFloor=1$' \
             verification/normal-daemon.log
       - uses: actions/setup-java@v4
         with:
@@ -132,7 +134,7 @@ jobs:
             echo
             echo '```text'
             if test -f "$INGEST_DAEMON_WORK_DIR/daemon.log"; then
-              grep -E '^PIXELS_NORMAL_INGEST_(DAEMON|FAIL_CLOSED)_PASS ' verification/normal-daemon.log || true
+              grep -E '^PIXELS_NORMAL_INGEST_(DAEMON|CUTOVER|FAIL_CLOSED)_PASS ' verification/normal-daemon.log || true
             fi
             if test -f verification/journal-gc.log; then
               grep -E '^(LocalMutationJournalContract:|Journal GC contract:)' verification/journal-gc.log || true
