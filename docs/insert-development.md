@@ -168,11 +168,15 @@ legacy write fence, and shuts down cleanly. Before starting services, the second
 process opens the same catalog, plan and WAL state and validates the handoff; it
 then recovers both PUBLISHED decisions, reaches READY, shuts down, and reads the
 Pixels files directly to prove an exact 65-row multiset without replay duplicates.
-Catalog persistence and topology discovery remain fixtures.
+It finally corrupts a copied committed-decision state and removes the published
+checkpoint body in turn; separate daemon attempts must fail before READY with an
+actionable checksum or missing-body error. Catalog persistence and topology
+discovery remain fixtures.
 
 ~~~text
 PIXELS_NORMAL_INGEST_DAEMON_PHASE1_PASS rows=65 checkpointedTransaction=1
 PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2
+PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1
 ~~~
 
 ### Full SQL end-to-end
@@ -220,7 +224,9 @@ TestPixelsIngestStorage uses real Pixels files, native visibility and SQLite to
 verify read-pin rollback, stable row relocation, physical retirement,
 checkpointed GC-WAL deletion and restart of journal/installer/index objects.
 Coordinator tests cover terminal-fence compaction/high-water rejection; journal
-tests inject crashes around WAL generation publication.
+tests inject crashes around WAL generation publication. TestRecoveryCheckpoint
+covers 29 body-codec, pointer-publication, replacement and corrupt/missing-state
+cases; it is part of the Full SQL CI lifecycle regression set.
 
 ## Remaining limitations
 
