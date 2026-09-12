@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: e5d54f27a7f4a20442152441773f164e3d2d7976
+          ref: bddf341e805a0a058efe4786f812da9622480cb9
           path: pixels
           persist-credentials: false
       - uses: actions/setup-java@v4
