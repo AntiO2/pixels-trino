@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: bddf341e805a0a058efe4786f812da9622480cb9
+          ref: 43762610a8de3302115ebb06dd918c5d3355f007
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -62,7 +62,7 @@ jobs:
           mvn -B -ntp -f pixels/pom.xml \
             -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
             -am -DskipTests=false \
-            -Dtest=TestIngestWriterAllocation,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
+            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
             -Dsurefire.failIfNoSpecifiedTests=false -Dmaven.source.skip=true install \
             2>&1 | tee verification/pixels-build.log
           bash pixels/tools/verify-ingest-gc.sh \
@@ -72,6 +72,7 @@ jobs:
             -Dpixels.retina.test.allocator="$PIXELS_HOME/lib/libjemalloc.so" test \
             2>&1 | tee verification/storage-rewrite.log
           mkdir -p verification/unit-tests
+          cp pixels/pixels-common/target/surefire-reports/*TestIngestClient* verification/unit-tests/
           cp pixels/pixels-daemon/target/surefire-reports/*TestIngestWriterAllocation* verification/unit-tests/
           cp pixels/pixels-daemon/target/surefire-reports/*TestPixelsIngestStorage* verification/unit-tests/
           cp pixels/pixels-daemon/target/surefire-reports/*TestDurableIngestCoordinatorGc* verification/unit-tests/

@@ -33,6 +33,9 @@ register coordinator and participant services. The coordinator recovers its
 locked state volume before accepting writes. Retina recovers the recovery
 checkpoint, Storage-GC WAL, installation plans and mutation journal; it reports
 READY only after participant recovery completes.
+Coordinator-to-participant RPCs wait for a recovering participant within the
+configured transaction deadline, so an early reconciliation connection failure
+cannot leak as the first post-READY Prepare failure.
 
 Startup fails closed for missing/corrupt confirmed state, a missing WAL
 generation, inconsistent recovery coverage, a state-volume ownership conflict,
