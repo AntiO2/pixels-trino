@@ -160,12 +160,19 @@ bash tools/verify-ingest-daemon.sh
 ~~~
 
 This starts isolated real etcd and production TransServer, RetinaServer and
-ServerContainer, performs one real transaction INSERT, reads it through Retina
-RPC, verifies the legacy write fence, and requires graceful shutdown to
-materialize a Pixels file. Catalog and topology discovery remain fixtures.
+ServerContainer in two independent backend JVMs over one locked state volume.
+The first process commits 64 rows, commits one still-buffered row, waits for a
+recovery checkpoint, verifies that the first transaction's full plan and WAL
+payload were physically replaced by compact checkpoint/fence state, checks the
+legacy write fence, and shuts down cleanly. Before starting services, the second
+process opens the same catalog, plan and WAL state and validates the handoff; it
+then recovers both PUBLISHED decisions, reaches READY, shuts down, and reads the
+Pixels files directly to prove an exact 65-row multiset without replay duplicates.
+Catalog persistence and topology discovery remain fixtures.
 
 ~~~text
-PIXELS_NORMAL_INGEST_DAEMON_PASS rows=1 pixelsFiles=1 services=TransServer,RetinaServer
+PIXELS_NORMAL_INGEST_DAEMON_PHASE1_PASS rows=65 checkpointedTransaction=1
+PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2
 ~~~
 
 ### Full SQL end-to-end
@@ -218,7 +225,8 @@ tests inject crashes around WAL generation publication.
 ## Remaining limitations
 
 - No replicated coordinator/participant log or automatic HA owner failover.
-- Fixed topology and process-local read leases; multi-owner GC is not certified.
+- Fixed topology, a persistent catalog fixture and process-local read leases;
+  multi-owner GC is not certified.
 - No Trino task-attempt retry protocol.
 - UPDATE/DELETE MergeSink is not implemented.
 - Unique secondary constraints are rejected.

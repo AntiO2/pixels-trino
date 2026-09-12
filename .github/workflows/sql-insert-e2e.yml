@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: e0c7b36f909a0b41797284ea5d02e9438c716e0c
+          ref: 984c210a0ebdb2fc13708df8801d6718431d3931
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -92,7 +92,7 @@ jobs:
             INGEST_DAEMON_SKIP_BUILD=1 \
             bash pixels/tools/verify-ingest-daemon.sh \
             2>&1 | tee verification/normal-daemon.log
-          grep -q '^PIXELS_NORMAL_INGEST_DAEMON_PASS rows=1 pixelsFiles=1 services=TransServer,RetinaServer$' \
+          grep -q '^PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2$' \
             "$INGEST_DAEMON_WORK_DIR/daemon.log"
       - uses: actions/setup-java@v4
         with:
