@@ -7,6 +7,7 @@ on:
       - 'connector/**'
       - 'tools/verify-sql-insert.sh'
       - 'tools/ingest-contract/sql-runtime/**'
+      - 'docs/insert-development.md'
       - '.github/workflows/sql-insert-e2e.yml'
       - 'pom.xml'
   workflow_dispatch:
@@ -25,6 +26,7 @@ jobs:
     env:
       PIXELS_HOME: ${{ github.workspace }}/pixels-home
       SQL_E2E_WORK_DIR: ${{ github.workspace }}/verification/sql
+      INGEST_DAEMON_WORK_DIR: ${{ github.workspace }}/verification/daemon
       SQL_E2E_SKIP_BUILD: '1'
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: 1d536d150e6ef47f7c3312514ede3f21023a42d8
+          ref: 56fa575f551ad377d283ba1caa4910a1374b53ac
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -53,17 +55,45 @@ jobs:
           cache-dependency-path: |
             pixels/**/pom.xml
             pixels-trino/**/pom.xml
-      - name: Build Pixels and run writer allocation regressions
+      - name: Build Pixels and run lifecycle regressions
         shell: bash
         run: |
           set -euo pipefail
           mvn -B -ntp -f pixels/pom.xml \
             -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
-            -am -DskipTests=false -Dtest=TestIngestWriterAllocation \
+            -am -DskipTests=false \
+            -Dtest=TestIngestWriterAllocation,TestRetinaServer,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
             -Dsurefire.failIfNoSpecifiedTests=false -Dmaven.source.skip=true install \
             2>&1 | tee verification/pixels-build.log
+          bash pixels/tools/verify-ingest-gc.sh \
+            2>&1 | tee verification/journal-gc.log
+          mvn -B -ntp -f pixels/pixels-daemon/pom.xml \
+            -DskipTests=false -Dtest=TestPixelsIngestStorage \
+            -Dpixels.retina.test.allocator="$PIXELS_HOME/lib/libjemalloc.so" test \
+            2>&1 | tee verification/storage-rewrite.log
           mkdir -p verification/unit-tests
           cp pixels/pixels-daemon/target/surefire-reports/*TestIngestWriterAllocation* verification/unit-tests/
+          cp pixels/pixels-daemon/target/surefire-reports/*TestPixelsIngestStorage* verification/unit-tests/
+          cp pixels/pixels-daemon/target/surefire-reports/*TestDurableIngestCoordinatorGc* verification/unit-tests/
+          cp pixels/pixels-daemon/target/surefire-reports/*TestServerContainer* verification/unit-tests/
+          cp pixels/pixels-daemon/target/surefire-reports/*TestRetinaServer* verification/unit-tests/
+          cp pixels/pixels-retina/target/surefire-reports/*TestRetinaIngestParticipantCheckpoint* verification/unit-tests/
+          cp pixels/pixels-retina/target/surefire-reports/*TestStorageGcWal* verification/unit-tests/
+          cp pixels/pixels-index/pixels-index-main-sqlite/target/surefire-reports/*TestSqliteMainIndex* verification/unit-tests/
+      - name: Run production daemon lifecycle smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            --output verification/etcd.tar.gz \
+            https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz
+          tar -xzf verification/etcd.tar.gz -C verification
+          ETCD_BIN="$PWD/verification/etcd-v3.5.17-linux-amd64/etcd" \
+            INGEST_DAEMON_SKIP_BUILD=1 \
+            bash pixels/tools/verify-ingest-daemon.sh \
+            2>&1 | tee verification/normal-daemon.log
+          grep -q '^PIXELS_NORMAL_INGEST_DAEMON_PASS rows=1 pixelsFiles=1 services=TransServer,RetinaServer$' \
+            "$INGEST_DAEMON_WORK_DIR/daemon.log"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -98,6 +128,12 @@ jobs:
             echo "Pixels-Trino: $(cat verification/pixels-trino.commit)"
             echo
             echo '```text'
+            if test -f "$INGEST_DAEMON_WORK_DIR/daemon.log"; then
+              grep '^PIXELS_NORMAL_INGEST_DAEMON_PASS ' "$INGEST_DAEMON_WORK_DIR/daemon.log" || true
+            fi
+            if test -f verification/journal-gc.log; then
+              grep -E '^(LocalMutationJournalContract:|Journal GC contract:)' verification/journal-gc.log || true
+            fi
             if test -f "$SQL_E2E_WORK_DIR/sql.log"; then
               grep -E '(^|[[:space:]])(SQL_PASS |SQL_EXPECTED_REJECTION |FULL_SQL_INSERT_E2E_PASS )' "$SQL_E2E_WORK_DIR/sql.log" || true
             else
@@ -115,6 +151,7 @@ jobs:
             verification/*.commit
             verification/*.log
             verification/unit-tests/*
+            verification/daemon/*.log
             verification/sql/*.log
             verification/sql/exit-code
             verification/sql/status.properties
