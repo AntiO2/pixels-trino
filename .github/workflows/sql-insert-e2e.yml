@@ -1,12 +1,11 @@
-name: Full SQL INSERT
+name: Transactional INSERT end-to-end
 
 on:
   push:
     branches: [feat/trino-insert-180]
     paths:
       - 'connector/**'
-      - 'tools/verify-sql-insert.sh'
-      - 'tools/ingest-contract/sql-runtime/**'
+      - 'tools/**'
       - 'docs/insert-development.md'
       - '.github/workflows/sql-insert-e2e.yml'
       - 'pom.xml'
@@ -16,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: sql-insert-e2e-${{ github.ref }}
+  group: transactional-insert-e2e-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -71,17 +70,6 @@ jobs:
             -DskipTests=false -Dtest=TestPixelsIngestStorage \
             -Dpixels.retina.test.allocator="$PIXELS_HOME/lib/libjemalloc.so" test \
             2>&1 | tee verification/storage-rewrite.log
-          mkdir -p verification/unit-tests
-          cp pixels/pixels-common/target/surefire-reports/*TestIngestClient* verification/unit-tests/
-          cp pixels/pixels-daemon/target/surefire-reports/*TestIngestWriterAllocation* verification/unit-tests/
-          cp pixels/pixels-daemon/target/surefire-reports/*TestPixelsIngestStorage* verification/unit-tests/
-          cp pixels/pixels-daemon/target/surefire-reports/*TestDurableIngestCoordinatorGc* verification/unit-tests/
-          cp pixels/pixels-daemon/target/surefire-reports/*TestServerContainer* verification/unit-tests/
-          cp pixels/pixels-daemon/target/surefire-reports/*TestRetinaServer* verification/unit-tests/
-          cp pixels/pixels-retina/target/surefire-reports/*TestRetinaIngestParticipantCheckpoint* verification/unit-tests/
-          cp pixels/pixels-retina/target/surefire-reports/*TestRecoveryCheckpoint* verification/unit-tests/
-          cp pixels/pixels-retina/target/surefire-reports/*TestStorageGcWal* verification/unit-tests/
-          cp pixels/pixels-index/pixels-index-main-sqlite/target/surefire-reports/*TestSqliteMainIndex* verification/unit-tests/
       - name: Run production daemon lifecycle smoke
         shell: bash
         run: |
@@ -156,23 +144,9 @@ jobs:
           path: |
             verification/*.commit
             verification/*.log
-            verification/unit-tests/*
             verification/daemon/*.log
             verification/sql/*.log
             verification/sql/exit-code
             verification/sql/status.properties
           retention-days: 7
           if-no-files-found: error
-      - name: Archive exact tested sources
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p source-snapshots
-          git -C pixels archive --format=tar --prefix=pixels/ HEAD | gzip > source-snapshots/pixels.tar.gz
-          git -C pixels-trino archive --format=tar --prefix=pixels-trino/ HEAD | gzip > source-snapshots/pixels-trino.tar.gz
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sql-insert-e2e-sources
-          path: source-snapshots/
-          retention-days: 3
