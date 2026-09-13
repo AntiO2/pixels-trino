@@ -8,6 +8,18 @@ MVN=${MVN:-mvn}
 MAVEN_ARGS=("$@")
 : "${PIXELS_HOME:?PIXELS_HOME must point to a built Pixels runtime with native Retina libraries}"
 WORK=${SQL_E2E_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/pixels-sql-e2e-XXXXXXXX")}
+SQL_E2E_MAIN_CLASS=${SQL_E2E_MAIN_CLASS:-io.pixelsdb.pixels.trino.testing.FullSqlInsert}
+SQL_E2E_TIMEOUT_SECONDS=${SQL_E2E_TIMEOUT_SECONDS:-180}
+SQL_E2E_BACKEND_HEAP=${SQL_E2E_BACKEND_HEAP:-1g}
+SQL_E2E_PASS_PATTERN=${SQL_E2E_PASS_PATTERN:-'(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=1008 trinoWorkers=2( |$)'}
+if [[ ! "$SQL_E2E_MAIN_CLASS" =~ ^[A-Za-z_][A-Za-z0-9_.]*$ ]] ||
+   [[ ! "$SQL_E2E_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "$SQL_E2E_BACKEND_HEAP" =~ ^[1-9][0-9]*[mMgG]$ ]]; then
+    echo "Invalid SQL_E2E_MAIN_CLASS, SQL_E2E_TIMEOUT_SECONDS, or SQL_E2E_BACKEND_HEAP" >&2
+    exit 2
+fi
+SQL_E2E_MAIN_SOURCE="$TRINO/tools/ingest-contract/sql-runtime/src/main/java/${SQL_E2E_MAIN_CLASS//./\/}.java"
+[[ -f "$SQL_E2E_MAIN_SOURCE" ]] || { echo "Missing SQL driver source: $SQL_E2E_MAIN_SOURCE" >&2; exit 2; }
 mkdir -p "$WORK"
 WORK=$(cd "$WORK" && pwd)
 if [[ -e "$WORK/ready" || -e "$WORK/stop" ]]; then
@@ -52,7 +64,7 @@ backend = [pixels / 'pixels-daemon/target/test-classes', pixels / 'pixels-daemon
 (work / 'backend.cp').write_text(os.pathsep.join(map(str, backend)) + os.pathsep + (work / 'backend-dependencies.cp').read_text().strip())
 PY
 javac -cp "$(cat "$WORK/engine.cp")" -d "$WORK/driver-classes" \
-    "$TRINO/tools/ingest-contract/sql-runtime/src/main/java/io/pixelsdb/pixels/trino/testing/FullSqlInsert.java"
+    "$SQL_E2E_MAIN_SOURCE"
 
 export LD_LIBRARY_PATH="$PIXELS_HOME/lib:${LD_LIBRARY_PATH:-}"
 # Jemalloc-enabled Retina uses a process-wide allocator. Scope interposition to
@@ -109,7 +121,7 @@ trap cleanup EXIT
 
 # The backend is a separate process with its own dependency graph. Only the
 # catalog, node directory and external ID source are fixtures; writes are real.
-"${BACKEND_ENV[@]}" java "${JAVA_ARGS[@]}" -Xmx1g -cp "$(cat "$WORK/backend.cp")" \
+"${BACKEND_ENV[@]}" java "${JAVA_ARGS[@]}" "-Xmx$SQL_E2E_BACKEND_HEAP" -cp "$(cat "$WORK/backend.cp")" \
     io.pixelsdb.pixels.daemon.transaction.ingest.SqlIngestFixtureMain "$WORK" > "$WORK/backend.log" 2>&1 &
 BACKEND_PID=$!
 for _ in $(seq 1 300); do
@@ -119,8 +131,8 @@ for _ in $(seq 1 300); do
 done
 [[ -f "$WORK/ready" ]] || { echo "Backend readiness deadline exceeded" >&2; exit 1; }
 export PIXELS_CONFIG="$WORK/pixels.properties"
-timeout -k 10s 180s java "${JAVA_ARGS[@]}" -Xmx3g \
+timeout -k 10s "${SQL_E2E_TIMEOUT_SECONDS}s" java "${JAVA_ARGS[@]}" -Xmx3g \
     -cp "$WORK/driver-classes:$(cat "$WORK/engine.cp")" \
-    io.pixelsdb.pixels.trino.testing.FullSqlInsert "$WORK" "$WORK/plugin.cp" > "$WORK/sql.log" 2>&1
+    "$SQL_E2E_MAIN_CLASS" "$WORK" "$WORK/plugin.cp" > "$WORK/sql.log" 2>&1
 cat "$WORK/sql.log"
-grep -Eq '(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=1008 trinoWorkers=2( |$)' "$WORK/sql.log"
+grep -Eq "$SQL_E2E_PASS_PATTERN" "$WORK/sql.log"

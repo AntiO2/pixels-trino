@@ -236,6 +236,86 @@ tests inject crashes around WAL generation publication. TestRecoveryCheckpoint
 covers 29 body-codec, pointer-publication, replacement and corrupt/missing-state
 cases; it is part of the Full SQL CI lifecycle regression set.
 
+### TPC-H and TPC-DS INSERT coverage
+
+Run the representative two-worker latency benchmark in an isolated environment:
+
+~~~sh
+PIXELS_HOME=/path/to/matching/runtime \
+bash tools/benchmark-tpch-tpcds-insert.sh /path/to/matching/pixels
+~~~
+
+Against an already running normal Trino and Retina deployment, copy and verify
+all eight TPC-H and all 24 TPC-DS tiny tables:
+
+~~~sh
+JAVA_HOME=/path/to/jdk-23 \
+bash tools/verify-all-tpc-tables.sh \
+  jdbc:trino://127.0.0.1:18081 \
+  /persistent/pixels/tables \
+  tpc_insert_all
+
+JAVA_HOME=/path/to/jdk-23 ALL_TPC_VERIFY_ONLY=true \
+bash tools/verify-all-tpc-tables.sh \
+  jdbc:trino://127.0.0.1:18081 \
+  /persistent/pixels/tables \
+  tpc_insert_all
+~~~
+
+Run the second command after the configured buffer flush interval and again
+after stopping and restarting the normal Coordinator and Retina JVMs. It
+compares row counts and an order-independent checksum of every column. Before
+restart, record the recovery-checkpoint pointer and verify that WAL and
+installer state have actually shrunk; a READY message alone is insufficient.
+
+`retina.ingest.max.prepared.rows` limits one prepared transaction, not a table
+or MemTable. Size it above the largest supported single INSERT while retaining
+a bounded failure domain. TPC-DS tiny `customer_demographics` contains
+1,920,800 rows, so the default 1,000,000-row limit deliberately rejects that
+one-statement load; the all-table verification uses 3,000,000.
+
+On September 13, 2026 the normal-daemon run inserted 2,695,496 rows across all
+32 tables. After the 60-second forced flush, WAL fell from 218 MiB to 12 KiB and
+installer state from 128 KiB to 16 KiB. A process restart loaded the published
+checkpoint with zero pending replay segments, and all 32 row multisets matched.
+
+The same run exposed and fixed two recovery-only failures: replay now preserves
+the recorded file identity when a plan crosses a file boundary, and local
+object reads copy reader-owned direct/mapped memory before closing the reader.
+These are required for deterministic recovery; neither may be replaced by
+allocating a fresh file or returning a buffer owned by a closed reader.
+
+### Local Trino smoke test
+
+For a deployment whose Trino HTTP port is 18081:
+
+~~~sh
+/path/to/trino --server http://127.0.0.1:18081 \
+  --catalog pixels --schema demo
+~~~
+
+Then create a dedicated path and table and exercise immediate visibility:
+
+~~~sql
+CREATE SCHEMA IF NOT EXISTS pixels.demo;
+CREATE TABLE pixels.demo.insert_smoke (
+  id bigint,
+  label varchar,
+  amount decimal(12, 2),
+  created date
+) WITH (
+  storage = 'file',
+  paths = 'file:///persistent/pixels/tables/demo/insert_smoke'
+);
+INSERT INTO pixels.demo.insert_smoke VALUES
+  (1, 'alpha', DECIMAL '12.30', DATE '2026-09-13'),
+  (2, NULL, NULL, NULL);
+SELECT * FROM pixels.demo.insert_smoke ORDER BY id;
+~~~
+
+Create a new empty directory for a new table. Do not point `paths` at another
+table or change the offline-cutover baseline while services are live.
+
 ## Remaining limitations
 
 - No replicated coordinator/participant log or automatic HA owner failover.
