@@ -11,27 +11,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '23'
-      - name: Resolve the pinned engine and missing plugin-test artifacts
+      - name: Download pinned lifecycle dependencies
         shell: bash
         run: |
           set -euo pipefail
-          mvn -B -ntp -f tools/ingest-contract/sql-runtime/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:build-classpath
-          for coordinate in org.antlr:antlr4-runtime:4.13.2 io.airlift:jaxrs:287 io.airlift:jmx:287 org.glassfish.jersey.containers:jersey-container-servlet-core:3.1.9 org.glassfish.jersey.containers:jersey-container-servlet:3.1.9 org.glassfish.jersey.core:jersey-common:3.1.9 org.glassfish.jersey.core:jersey-server:3.1.9 org.glassfish.jersey.core:jersey-client:3.1.9 org.glassfish.jersey.inject:jersey-hk2:3.1.9; do
-            mvn -B -ntp -f tools/ingest-contract/sql-runtime/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:get -Dartifact="$coordinate" -Dtransitive=true
-          done
-          tar -czf dependencies.tar.gz -C "$HOME/.m2" repository
-          sha256sum dependencies.tar.gz > dependencies.sha256
+          curl --fail --location --retry 3 --output etcd.tar.gz https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz
+          curl --fail --location --retry 3 --output google-java-format.jar https://repo.maven.apache.org/maven2/com/google/googlejavaformat/google-java-format/1.24.0/google-java-format-1.24.0-all-deps.jar
+          sha256sum etcd.tar.gz google-java-format.jar > tools.sha256
+          tar -xzf etcd.tar.gz
+          ./etcd-v3.5.17-linux-amd64/etcd --version
       - uses: actions/upload-artifact@v4
         with:
-          name: part1-build-dependencies
+          name: part1-lifecycle-tools
           path: |
-            dependencies.tar.gz
-            dependencies.sha256
+            etcd.tar.gz
+            google-java-format.jar
+            tools.sha256
           retention-days: 1
