@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           mvn -B -ntp -f tools/ingest-contract/sql-runtime/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:build-classpath
           for coordinate in org.antlr:antlr4-runtime:4.13.2 io.airlift:jaxrs:287 io.airlift:jmx:287 org.glassfish.jersey.containers:jersey-container-servlet-core:3.1.9 org.glassfish.jersey.containers:jersey-container-servlet:3.1.9 org.glassfish.jersey.core:jersey-common:3.1.9 org.glassfish.jersey.core:jersey-server:3.1.9 org.glassfish.jersey.core:jersey-client:3.1.9 org.glassfish.jersey.inject:jersey-hk2:3.1.9; do
-            mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:2.10:get -Dartifact="$coordinate" -Dtransitive=true
+            mvn -B -ntp -f tools/ingest-contract/sql-runtime/pom.xml org.apache.maven.plugins:maven-dependency-plugin:2.10:get -Dartifact="$coordinate" -Dtransitive=true
           done
           tar -czf dependencies.tar.gz -C "$HOME/.m2" repository
           sha256sum dependencies.tar.gz > dependencies.sha256
