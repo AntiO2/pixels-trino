@@ -1,0 +1,37 @@
+name: Part-1 paired source baseline
+on:
+  push:
+    branches: [feat/trino-insert-180]
+    paths: ['.github/workflows/part1-source-snapshot.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pixels-trino
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: AntiO2/pixels
+          ref: a2560771fcb167f8c6d8f89d4084ae7b89c098ee
+          path: pixels
+          persist-credentials: false
+      - name: Archive exact paired working copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir snapshots
+          git -C pixels rev-parse HEAD > snapshots/pixels.commit
+          git -C pixels-trino rev-parse HEAD > snapshots/pixels-trino.commit
+          tar -czf snapshots/pixels.tar.gz pixels
+          tar -czf snapshots/pixels-trino.tar.gz pixels-trino
+          sha256sum snapshots/*.tar.gz > snapshots/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part1-source-baseline
+          path: snapshots/
+          retention-days: 1
