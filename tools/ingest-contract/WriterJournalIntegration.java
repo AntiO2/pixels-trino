@@ -34,6 +34,16 @@ import java.util.stream.Stream;
 /** Cross-repository staging integration; not a Trino SQL or commit test. */
 public final class WriterJournalIntegration
 {
+    private static final long TRANSACTION_ID = 100;
+    private static final long STATEMENT_ID = 1;
+    private static final long FIRST_WRITER_ID = 1;
+    private static final long SECOND_WRITER_ID = 2;
+    private static final long TABLE_ID = 5;
+    private static final long SCHEMA_VERSION = 1;
+    private static final int PAYLOAD_FORMAT = 1;
+    private static final long MAX_BUFFERED_BYTES = 8192;
+    private static final int MAX_STREAMS = 4;
+
     public static void main(String[] args) throws Exception
     {
         Path directory = Files.createTempDirectory("pixels-writer-journal-");
@@ -64,8 +74,12 @@ public final class WriterJournalIntegration
                         catch (Exception error) { return failure(error); }
                     }
                 };
-                PixelsMutationWriter first = new PixelsMutationWriter(100, 1, 5, 1, 1, 8192, 4, transport);
-                PixelsMutationWriter second = new PixelsMutationWriter(100, 2, 5, 1, 1, 8192, 4, transport);
+                PixelsMutationWriter first = new PixelsMutationWriter(
+                        TRANSACTION_ID, STATEMENT_ID, FIRST_WRITER_ID, TABLE_ID,
+                        SCHEMA_VERSION, PAYLOAD_FORMAT, MAX_BUFFERED_BYTES, MAX_STREAMS, transport);
+                PixelsMutationWriter second = new PixelsMutationWriter(
+                        TRANSACTION_ID, STATEMENT_ID, SECOND_WRITER_ID, TABLE_ID,
+                        SCHEMA_VERSION, PAYLOAD_FORMAT, MAX_BUFFERED_BYTES, MAX_STREAMS, transport);
                 byte[] equalRows = equalRows(10);
                 for (int batch = 0; batch < 50; batch++)
                 {
