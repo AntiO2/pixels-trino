@@ -289,6 +289,7 @@ deployment with `retina.ingest.write.representation=FILE` and
 JAVA_HOME=/path/to/jdk-23 \
 TPCH_SCHEMA=sf100 TPCDS_SCHEMA=sf100 \
 ALL_TPC_TRANSACTION_ROWS=20000000 \
+ALL_TPC_BARRIER_EACH_TRANSACTION=false \
 ALL_TPC_VISIBILITY_TIMEOUT_SECONDS=3600 \
 bash tools/verify-all-tpc-tables.sh \
   jdbc:trino://127.0.0.1:18081 \
@@ -297,12 +298,16 @@ bash tools/verify-all-tpc-tables.sh \
 ~~~
 
 The transaction-row target divides large tables into deterministic numeric-key
-ranges; every range is a separate DURABLE transaction followed by a
-fixed-boundary visibility barrier. Each table prints its source scan time,
+ranges. Each range is a separate DURABLE transaction. The SF100 performance
+configuration accepts all ranges asynchronously and uses one fixed-boundary
+visibility barrier per table; the default correctness configuration retains a
+barrier after every transaction. Each table prints its source scan time,
 DURABLE accepted time and throughput, visibility time, transaction count and
-largest observed transaction. Set `ALL_TPC_RESUME=true`
-to verify completed target tables and continue with missing tables after an
-interruption. The prepared-row and WAL limits must be sized for the largest
+largest observed transaction. Set `ALL_TPC_RESUME=true` to verify completed
+target tables and continue from the first missing deterministic transaction
+range in a partially imported table after an interruption. A non-empty partial
+range fails closed because each range is one atomic transaction. The prepared-row
+and WAL limits must be sized for the largest
 observed transaction before starting the run.
 
 Run the second command after the configured buffer flush interval and again

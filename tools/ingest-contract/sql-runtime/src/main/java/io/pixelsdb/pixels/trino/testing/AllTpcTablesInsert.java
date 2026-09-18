@@ -23,7 +23,7 @@ public final class AllTpcTablesInsert {
 
     private record Bounds(long minimum, long maximum, long nullRows) {}
 
-    private record InsertResult(long rows, long acceptedNanos, long visibleNanos,
+    private record InsertResult(long rows, long acceptedRows, long acceptedNanos, long visibleNanos,
                                 int transactions, long largestTransactionRows) {}
 
     private static final List<Table> TPCH_TABLES = List.of(
@@ -83,6 +83,10 @@ public final class AllTpcTablesInsert {
         return value;
     }
 
+    private static boolean environmentBoolean(String name, boolean defaultValue) {
+        return Boolean.parseBoolean(environment(name, Boolean.toString(defaultValue)));
+    }
+
     private static String quote(String value) {
         return '"' + value.replace("\"", "\"\"") + '"';
     }
@@ -107,7 +111,12 @@ public final class AllTpcTablesInsert {
     }
 
     private static long count(Statement statement, String table) throws Exception {
-        try (ResultSet result = statement.executeQuery("SELECT count(*) FROM " + table)) {
+        return count(statement, table, "");
+    }
+
+    private static long count(Statement statement, String table, String predicate) throws Exception {
+        try (ResultSet result = statement.executeQuery(
+                "SELECT count(*) FROM " + table + predicate)) {
             if (!result.next()) {
                 throw new AssertionError("Missing count result for " + table);
             }
@@ -164,6 +173,8 @@ public final class AllTpcTablesInsert {
             String chunkColumn,
             long sourceRows,
             long transactionRows,
+            boolean resume,
+            boolean barrierEachTransaction,
             long visibilityTimeoutSeconds)
             throws Exception {
         Bounds bounds = transactionRows == 0 || sourceRows <= transactionRows
@@ -180,6 +191,7 @@ public final class AllTpcTablesInsert {
                                 desiredTransactions)
                         / desiredTransactions);
         long rows = 0;
+        long acceptedRows = 0;
         long acceptedNanos = 0;
         long visibleNanos = 0;
         long largestTransactionRows = 0;
@@ -191,16 +203,35 @@ public final class AllTpcTablesInsert {
                 long upper = Math.min(bounds.maximum(), Math.addExact(lower, rangeWidth - 1));
                 predicate = " WHERE " + quote(chunkColumn) + " BETWEEN " + lower + " AND " + upper;
             }
+            long expected = count(statement, source, predicate);
+            long existing = resume ? count(statement, target, predicate) : 0;
+            if (existing == expected) {
+                rows += existing;
+                if (bounds == null) {
+                    break;
+                }
+                lower = Math.addExact(lower, rangeWidth);
+                continue;
+            }
+            if (existing != 0) {
+                throw new AssertionError(
+                        "Partial transaction range in " + target + predicate
+                                + ": expected=" + expected + ", existing=" + existing);
+            }
             long acceptedStart = System.nanoTime();
             long affected = statement.executeUpdate(
                     "INSERT INTO " + target + " SELECT * FROM " + source + predicate);
+            if (affected != expected) {
+                throw new AssertionError(
+                        "Affected rows differ from fixed source range in " + source + predicate
+                                + ": expected=" + expected + ", affected=" + affected);
+            }
             acceptedNanos += System.nanoTime() - acceptedStart;
-            long visibleStart = System.nanoTime();
-            statement.execute(
-                    "CALL pixels.system.flush_visible_barrier(timeout_seconds => "
-                            + visibilityTimeoutSeconds + ")");
-            visibleNanos += System.nanoTime() - visibleStart;
+            if (barrierEachTransaction) {
+                visibleNanos += awaitVisible(statement, visibilityTimeoutSeconds);
+            }
             rows += affected;
+            acceptedRows += affected;
             largestTransactionRows = Math.max(largestTransactionRows, affected);
             transactions++;
             if (bounds == null) {
@@ -209,22 +240,50 @@ public final class AllTpcTablesInsert {
             lower = Math.addExact(lower, rangeWidth);
         }
         if (bounds != null && bounds.nullRows() > 0) {
-            long acceptedStart = System.nanoTime();
-            long affected = statement.executeUpdate(
-                    "INSERT INTO " + target + " SELECT * FROM " + source
-                            + " WHERE " + quote(chunkColumn) + " IS NULL");
-            acceptedNanos += System.nanoTime() - acceptedStart;
-            long visibleStart = System.nanoTime();
-            statement.execute(
-                    "CALL pixels.system.flush_visible_barrier(timeout_seconds => "
-                            + visibilityTimeoutSeconds + ")");
-            visibleNanos += System.nanoTime() - visibleStart;
-            rows += affected;
-            largestTransactionRows = Math.max(largestTransactionRows, affected);
-            transactions++;
+            String predicate = " WHERE " + quote(chunkColumn) + " IS NULL";
+            long existing = resume ? count(statement, target, predicate) : 0;
+            if (existing == bounds.nullRows()) {
+                rows += existing;
+            }
+            else if (existing != 0) {
+                throw new AssertionError(
+                        "Partial null-key transaction in " + target
+                                + ": expected=" + bounds.nullRows() + ", existing=" + existing);
+            }
+            else {
+                long acceptedStart = System.nanoTime();
+                long affected = statement.executeUpdate(
+                        "INSERT INTO " + target + " SELECT * FROM " + source + predicate);
+                if (affected != bounds.nullRows()) {
+                    throw new AssertionError(
+                            "Affected rows differ from null-key source range in " + source
+                                    + ": expected=" + bounds.nullRows() + ", affected=" + affected);
+                }
+                acceptedNanos += System.nanoTime() - acceptedStart;
+                if (barrierEachTransaction) {
+                    visibleNanos += awaitVisible(statement, visibilityTimeoutSeconds);
+                }
+                rows += affected;
+                acceptedRows += affected;
+                largestTransactionRows = Math.max(largestTransactionRows, affected);
+                transactions++;
+            }
+        }
+        if (!barrierEachTransaction && transactions > 0) {
+            visibleNanos += awaitVisible(statement, visibilityTimeoutSeconds);
         }
         return new InsertResult(
-                rows, acceptedNanos, visibleNanos, transactions, largestTransactionRows);
+                rows, acceptedRows, acceptedNanos, visibleNanos,
+                transactions, largestTransactionRows);
+    }
+
+    private static long awaitVisible(Statement statement, long visibilityTimeoutSeconds)
+            throws Exception {
+        long start = System.nanoTime();
+        statement.execute(
+                "CALL pixels.system.flush_visible_barrier(timeout_seconds => "
+                        + visibilityTimeoutSeconds + ")");
+        return System.nanoTime() - start;
     }
 
     private static long copy(
@@ -234,6 +293,8 @@ public final class AllTpcTablesInsert {
             Path dataRoot,
             Table table,
             boolean verifyOnly,
+            boolean resumeExisting,
+            boolean barrierEachTransaction,
             long visibilityTimeoutSeconds,
             long transactionRows)
             throws Exception {
@@ -245,24 +306,38 @@ public final class AllTpcTablesInsert {
         long sourceRows = count(statement, source);
         String sourceChecksum = checksum(statement, source, columns);
         long sourceScanNanos = System.nanoTime() - sourceScanStart;
-        InsertResult inserted = new InsertResult(sourceRows, 0, 0, 0, 0);
+        boolean completedBeforeRun = false;
+        InsertResult inserted = new InsertResult(sourceRows, 0, 0, 0, 0, 0);
         if (!verifyOnly) {
             String definitions = columns.stream()
                     .map(column -> quote(column.name()) + " " + column.type())
                     .collect(java.util.stream.Collectors.joining(", "));
             String path = dataRoot.resolve(targetSchema).resolve(targetName).toUri().toString();
-            statement.execute(
-                    "CREATE TABLE " + target + " (" + definitions
-                            + ") WITH (storage='file', paths='"
-                            + path.replace("'", "''") + "')");
-            inserted = insert(
-                    statement,
-                    target,
-                    source,
-                    table.chunkColumn(),
-                    sourceRows,
-                    transactionRows,
-                    visibilityTimeoutSeconds);
+            if (!resumeExisting) {
+                statement.execute(
+                        "CREATE TABLE " + target + " (" + definitions
+                                + ") WITH (storage='file', paths='"
+                                + path.replace("'", "''") + "')");
+            }
+            else {
+                long existingRows = count(statement, target);
+                if (existingRows == sourceRows
+                        && sourceChecksum.equals(checksum(statement, target, columns))) {
+                    completedBeforeRun = true;
+                }
+            }
+            if (!completedBeforeRun) {
+                inserted = insert(
+                        statement,
+                        target,
+                        source,
+                        table.chunkColumn(),
+                        sourceRows,
+                        transactionRows,
+                        resumeExisting,
+                        barrierEachTransaction,
+                        visibilityTimeoutSeconds);
+            }
         }
         long targetRows = count(statement, target);
         String targetChecksum = checksum(statement, target, columns);
@@ -276,18 +351,20 @@ public final class AllTpcTablesInsert {
         System.out.printf(
                 Locale.ROOT,
                 "TPC_TABLE_%s_PASS source=%s rows=%d columns=%d sourceScanMs=%d "
-                        + "acceptedMs=%d acceptedRowsPerSecond=%.2f visibleAfterAcceptedMs=%d "
+                        + "acceptedRows=%d acceptedMs=%d acceptedRowsPerSecond=%.2f "
+                        + "visibleAfterAcceptedMs=%d "
                         + "transactions=%d largestTransactionRows=%d "
                         + "checksum=%s%n",
-                verifyOnly ? "RECOVERY" : "INSERT",
+                verifyOnly || completedBeforeRun ? "RECOVERY" : "INSERT",
                 source,
                 sourceRows,
                 columns.size(),
                 TimeUnit.NANOSECONDS.toMillis(sourceScanNanos),
+                inserted.acceptedRows(),
                 TimeUnit.NANOSECONDS.toMillis(inserted.acceptedNanos()),
                 inserted.acceptedNanos() == 0
                         ? 0
-                        : sourceRows * (double) NANOSECONDS_PER_SECOND
+                        : inserted.acceptedRows() * (double) NANOSECONDS_PER_SECOND
                                 / inserted.acceptedNanos(),
                 TimeUnit.NANOSECONDS.toMillis(inserted.visibleNanos()),
                 inserted.transactions(),
@@ -323,6 +400,8 @@ public final class AllTpcTablesInsert {
         long visibilityTimeoutSeconds = positiveLong(
                 "ALL_TPC_VISIBILITY_TIMEOUT_SECONDS", DEFAULT_VISIBILITY_TIMEOUT_SECONDS);
         long transactionRows = nonNegativeLong("ALL_TPC_TRANSACTION_ROWS", 0);
+        boolean barrierEachTransaction = environmentBoolean(
+                "ALL_TPC_BARRIER_EACH_TRANSACTION", true);
         List<Dataset> datasets = List.of(
                 new Dataset("tpch", tpchSchema, TPCH_TABLES),
                 new Dataset("tpcds", tpcdsSchema, TPCDS_TABLES));
@@ -338,18 +417,19 @@ public final class AllTpcTablesInsert {
             }
             for (Dataset dataset : datasets) {
                 for (Table table : dataset.tables()) {
-                    boolean verifyTable = verifyOnly
-                            || (resume && tableExists(
-                                    statement,
-                                    targetSchema,
-                                    dataset.catalog() + "_" + table.name()));
+                    boolean targetExists = tableExists(
+                            statement,
+                            targetSchema,
+                            dataset.catalog() + "_" + table.name());
                     rows += copy(
                             statement,
                             dataset,
                             targetSchema,
                             dataRoot,
                             table,
-                            verifyTable,
+                            verifyOnly,
+                            resume && targetExists,
+                            barrierEachTransaction,
                             visibilityTimeoutSeconds,
                             transactionRows);
                     tables++;
