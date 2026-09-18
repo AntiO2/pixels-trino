@@ -288,6 +288,7 @@ deployment with `retina.ingest.write.representation=FILE` and
 ~~~sh
 JAVA_HOME=/path/to/jdk-23 \
 TPCH_SCHEMA=sf100 TPCDS_SCHEMA=sf100 \
+ALL_TPC_TRANSACTION_ROWS=20000000 \
 ALL_TPC_VISIBILITY_TIMEOUT_SECONDS=3600 \
 bash tools/verify-all-tpc-tables.sh \
   jdbc:trino://127.0.0.1:18081 \
@@ -295,11 +296,14 @@ bash tools/verify-all-tpc-tables.sh \
   tpc_sf100 | tee tpc-sf100-file-durable.log
 ~~~
 
-Each table prints its source scan time, DURABLE accepted time and throughput,
-and the subsequent fixed-boundary visibility time. Set `ALL_TPC_RESUME=true`
+The transaction-row target divides large tables into deterministic numeric-key
+ranges; every range is a separate DURABLE transaction followed by a
+fixed-boundary visibility barrier. Each table prints its source scan time,
+DURABLE accepted time and throughput, visibility time, transaction count and
+largest observed transaction. Set `ALL_TPC_RESUME=true`
 to verify completed target tables and continue with missing tables after an
 interruption. The prepared-row and WAL limits must be sized for the largest
-single source table before starting the run.
+observed transaction before starting the run.
 
 Run the second command after the configured buffer flush interval and again
 after stopping and restarting the normal Coordinator and Retina JVMs. It

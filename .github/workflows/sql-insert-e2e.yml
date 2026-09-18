@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: 89827c8fbe07d07207c11ca58b507fe5b3839aa4
+          ref: 54690c278be201894328bb32a4a051269e0ab6ae
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
