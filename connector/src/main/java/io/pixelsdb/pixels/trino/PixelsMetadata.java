@@ -97,7 +97,11 @@ public class PixelsMetadata implements ConnectorMetadata
         PixelsTableHandle target = (PixelsTableHandle) table;
         if (target.getTableType() != io.pixelsdb.pixels.planner.plan.logical.Table.TableType.BASE)
         { throw new TrinoException(io.trino.spi.StandardErrorCode.NOT_SUPPORTED, "INSERT target must be a base table"); }
-        return ingest.beginInsert(transHandle, target, columns.stream().map(PixelsColumnHandle.class::cast).toList());
+        return ingest.beginInsert(
+                transHandle,
+                session.getQueryId(),
+                target,
+                columns.stream().map(PixelsColumnHandle.class::cast).toList());
     }
 
     @Override
@@ -107,6 +111,15 @@ public class PixelsMetadata implements ConnectorMetadata
     {
         ingest.finishInsert(transHandle, (io.pixelsdb.pixels.trino.write.PixelsInsertTableHandle) handle, fragments);
         return java.util.Optional.empty();
+    }
+
+    @Override
+    public void cleanupQuery(ConnectorSession session)
+    {
+        if (ingest != null)
+        {
+            ingest.cleanupQuery(transHandle, session.getQueryId());
+        }
     }
 
 

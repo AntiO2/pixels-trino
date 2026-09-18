@@ -4,12 +4,23 @@ Related: pixelsdb/pixels-trino#180 and pixelsdb/pixels-trino#179.
 
 ## Implemented scope
 
-The connector supports single-statement autocommit INSERT VALUES and
-INSERT ... SELECT. Trino Pages are encoded into bounded column batches,
+The connector supports autocommit and explicit multi-statement INSERT VALUES
+and INSERT ... SELECT. One explicit transaction may write multiple tables in
+the same Pixels catalog and publication domain, and each statement reads its
+fixed public snapshot plus prior completed private writes. Trino Pages are encoded into bounded column batches,
 routed through authenticated ingestion RPCs and staged in a transaction-private
 Retina WAL. The durable coordinator records COMMIT or ABORT before installation.
-A successful commit is returned only after installed rows reach the published
-read timestamp.
+VISIBLE commit acknowledgement waits until installed rows reach the published
+read timestamp. DURABLE acknowledgement returns after the recoverable COMMIT
+decision and installation continues in the backend. Applications can close the
+current committed prefix and wait for visibility with:
+
+~~~sql
+CALL pixels.system.flush_visible_barrier(timeout_seconds => 30);
+~~~
+
+The barrier captures its committed boundary when called and does not wait for
+later transactions or global idleness.
 
 Installation reuses existing Retina write buffers and pixels-index:
 
@@ -59,6 +70,9 @@ retina.ingest.coordinator.state.dir=/absolute/state/coordinator
 retina.ingest.participant.plan.dir=/absolute/state/plans
 retina.ingest.participant.wal.dir=/absolute/state/wal
 retina.ingest.cutover.baseline.timestamp=0
+retina.ingest.write.representation=BUFFERED
+retina.ingest.commit.ack=VISIBLE
+retina.ingest.max.transactions=10000
 retina.ingest.terminal.retention.ms=86400000
 retina.ingest.terminal.max.transactions=100000
 retina.ingest.wal.segment.bytes=67108864
@@ -164,26 +178,27 @@ bash tools/verify-ingest-daemon.sh
 
 This starts isolated real etcd and production TransServer, RetinaServer and
 ServerContainer in two independent backend JVMs over one locked state volume.
-The first process commits 64 rows, commits one still-buffered row, waits for a
+The first process commits 64 rows, commits one still-buffered row, and commits
+two FILE transactions into one shared output. It waits for a
 recovery checkpoint, verifies that the first transaction's full plan and WAL
 payload were physically replaced by compact checkpoint/fence state, checks the
 legacy write fence, and shuts down cleanly. Before starting services, the second
 process opens the same catalog, plan and WAL state and validates the handoff; it
-then recovers both PUBLISHED decisions, reaches READY, shuts down, and reads the
-Pixels files directly to prove an exact 65-row multiset without replay duplicates.
+then recovers the PUBLISHED decisions, reaches READY, shuts down, and reads the
+Pixels files directly to prove an exact 73-row multiset without replay duplicates.
 It finally corrupts a copied committed-decision state and removes the published
 checkpoint body in turn; separate daemon attempts must fail before READY with an
 actionable checksum or missing-body error. An offline cutover phase first proves
 that a transaction allocator below the configured baseline is rejected. It then
 advances the isolated etcd ID domain while services are stopped, preserves all
-65 old physical rows, commits one new row above baseline 1000000000, and rechecks
+73 old physical rows, commits one new row above baseline 1000000000, and rechecks
 the legacy mutation fence. Catalog persistence and topology discovery remain
 fixtures.
 
 ~~~text
-PIXELS_NORMAL_INGEST_DAEMON_PHASE1_PASS rows=65 checkpointedTransaction=1
-PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2
-PIXELS_NORMAL_INGEST_CUTOVER_PASS oldRows=65 totalRows=66 baseline=1000000000 commitTimestamp=1000000002 legacyFence=1
+PIXELS_NORMAL_INGEST_DAEMON_PHASE1_PASS rows=73 sharedFileTransactions=2 checkpointedTransaction=5
+PIXELS_NORMAL_INGEST_DAEMON_PASS rows=73 pixelsFiles=3 services=TransServer,RetinaServer checkpointRestart=2 sharedFileTransactions=2
+PIXELS_NORMAL_INGEST_CUTOVER_PASS oldRows=73 totalRows=74 baseline=1000000000 commitTimestamp=1000000002 legacyFence=1
 PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1 allocatorFloor=1
 ~~~
 
@@ -208,7 +223,11 @@ one-Retina-owner integration, not HA certification.
 Assertions cover VALUES, duplicate preservation, NULLs, reordered/omitted
 columns, zero-row and 500-row INSERT SELECT, same-table INSERT SELECT,
 concurrent commits, buffer/file handoff and a 480-row private staging failure
-followed by durable Abort.
+followed by durable Abort. JDBC tests keep one connection across START
+TRANSACTION, verify multi-statement/multi-table private reads and atomic
+publication, exercise rollback and rejected transaction modes, and run once
+with VISIBLE acknowledgement and once with DURABLE plus an explicit visibility
+barrier.
 
 The September 11, 2026 baseline
 [run 34571751533](https://github.com/AntiO2/pixels-trino/actions/runs/34571751533)
@@ -261,6 +280,26 @@ bash tools/verify-all-tpc-tables.sh \
   /persistent/pixels/tables \
   tpc_insert_all
 ~~~
+
+For the complete SF100 `FILE + DURABLE` measurement, configure the Retina
+deployment with `retina.ingest.write.representation=FILE` and
+`retina.ingest.commit.ack=DURABLE`, then run:
+
+~~~sh
+JAVA_HOME=/path/to/jdk-23 \
+TPCH_SCHEMA=sf100 TPCDS_SCHEMA=sf100 \
+ALL_TPC_VISIBILITY_TIMEOUT_SECONDS=3600 \
+bash tools/verify-all-tpc-tables.sh \
+  jdbc:trino://127.0.0.1:18081 \
+  /persistent/pixels/tables \
+  tpc_sf100 | tee tpc-sf100-file-durable.log
+~~~
+
+Each table prints its source scan time, DURABLE accepted time and throughput,
+and the subsequent fixed-boundary visibility time. Set `ALL_TPC_RESUME=true`
+to verify completed target tables and continue with missing tables after an
+interruption. The prepared-row and WAL limits must be sized for the largest
+single source table before starting the run.
 
 Run the second command after the configured buffer flush interval and again
 after stopping and restarting the normal Coordinator and Retina JVMs. It

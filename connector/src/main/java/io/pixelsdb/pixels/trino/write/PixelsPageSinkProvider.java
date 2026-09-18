@@ -66,10 +66,12 @@ public final class PixelsPageSinkProvider implements ConnectorPageSinkProvider {
                             .setTransactionId(handle.getTransactionId())
                             .setTaskId(id.getId())
                             .setRequestId(UUID.randomUUID().toString())
+                            .setStatementId(handle.getStatementId())
                             .build();
             WriterAssignment writer = ingest.client().coordinator().allocateWriter(request);
             if (writer.getWriterId() <= 0
                     || writer.getTaskId() != request.getTaskId()
+                    || writer.getStatementId() != request.getStatementId()
                     || !writer.getRequestId().equals(request.getRequestId())) {
                 throw new IOException("Invalid ingestion writer assignment");
             }

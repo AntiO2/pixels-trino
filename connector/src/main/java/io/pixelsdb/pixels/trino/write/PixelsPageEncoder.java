@@ -30,8 +30,12 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import static io.pixelsdb.pixels.core.utils.DatetimeUtils.PICOS_PER_MILLIS;
+
 /** Converts Trino native Blocks to existing Pixels canonical scalar bytes, never SQL strings. */
 public final class PixelsPageEncoder {
+    private static final int INT128_LONG_WORD_COUNT = 2;
+
     private final TableSpec table;
     private final int[] inputChannels;
     private final Type[] inputTypes;
@@ -105,41 +109,42 @@ public final class PixelsPageEncoder {
                     if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
                         throw new IOException("SMALLINT overflow");
                     }
-                    return ByteBuffer.allocate(2).putShort((short) value).array();
+                    return ByteBuffer.allocate(Short.BYTES).putShort((short) value).array();
                 }
             case INT:
             case DATE:
-                return ByteBuffer.allocate(4)
+                return ByteBuffer.allocate(Integer.BYTES)
                         .putInt(Math.toIntExact(type.getLong(block, position)))
                         .array();
             case LONG:
             case TIMESTAMP:
-                return ByteBuffer.allocate(8).putLong(type.getLong(block, position)).array();
+                return ByteBuffer.allocate(Long.BYTES).putLong(type.getLong(block, position)).array();
             case TIME:
                 {
                     long picos = type.getLong(block, position);
-                    if (picos % 1000000000L != 0) {
+                    if (picos % PICOS_PER_MILLIS != 0) {
                         throw new IOException(
                                 "TIME cannot be represented losslessly in Pixels milliseconds");
                     }
-                    return ByteBuffer.allocate(4)
-                            .putInt(Math.toIntExact(picos / 1000000000L))
+                    return ByteBuffer.allocate(Integer.BYTES)
+                            .putInt(Math.toIntExact(picos / PICOS_PER_MILLIS))
                             .array();
                 }
             case FLOAT:
-                return ByteBuffer.allocate(4).putInt((int) type.getLong(block, position)).array();
+                return ByteBuffer.allocate(Float.BYTES).putInt((int) type.getLong(block, position)).array();
             case DOUBLE:
-                return ByteBuffer.allocate(8).putDouble(type.getDouble(block, position)).array();
+                return ByteBuffer.allocate(Double.BYTES).putDouble(type.getDouble(block, position)).array();
             case DECIMAL:
                 {
                     DecimalType decimal = (DecimalType) type;
                     if (decimal.isShort()) {
-                        return ByteBuffer.allocate(8)
+                        return ByteBuffer.allocate(Long.BYTES)
                                 .putLong(type.getLong(block, position))
                                 .array();
                     }
                     Int128 value = (Int128) type.getObject(block, position);
-                    return ByteBuffer.allocate(16)
+                    return ByteBuffer.allocate(
+                                    Math.multiplyExact(Long.BYTES, INT128_LONG_WORD_COUNT))
                             .putLong(value.getHigh())
                             .putLong(value.getLow())
                             .array();

@@ -210,7 +210,7 @@ public final class MutationWriterContract
 
     private static PixelsMutationWriter writer(long budget, int streams, MutationTransport transport)
     {
-        return new PixelsMutationWriter(1, 2, 3, 7, 1, budget, streams, transport);
+        return new PixelsMutationWriter(1, 1, 2, 3, 7, 1, budget, streams, transport);
     }
 
     private static CompletableFuture<Void> append(PixelsMutationWriter writer, int shard, int rows, byte[] bytes)

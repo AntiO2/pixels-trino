@@ -32,15 +32,18 @@ import java.util.*;
 /** Serializable pinned schema; handles contain no transport or mutable storage state. */
 public final class PixelsInsertTableHandle implements ConnectorInsertTableHandle {
     private final long transactionId;
+    private final long statementId;
     private final String table;
     private final List<PixelsColumnHandle> inputColumns;
 
     @JsonCreator
     public PixelsInsertTableHandle(
             @JsonProperty("transactionId") long transactionId,
+            @JsonProperty("statementId") long statementId,
             @JsonProperty("table") String table,
             @JsonProperty("inputColumns") List<PixelsColumnHandle> inputColumns) {
         this.transactionId = transactionId;
+        this.statementId = statementId;
         this.table = Objects.requireNonNull(table);
         this.inputColumns = List.copyOf(inputColumns);
     }
@@ -48,6 +51,11 @@ public final class PixelsInsertTableHandle implements ConnectorInsertTableHandle
     @JsonProperty
     public long getTransactionId() {
         return transactionId;
+    }
+
+    @JsonProperty
+    public long getStatementId() {
+        return statementId;
     }
 
     @JsonProperty

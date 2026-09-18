@@ -39,10 +39,12 @@ import io.pixelsdb.pixels.trino.properties.PixelsTableProperties;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
 import io.trino.spi.session.PropertyMetadata;
+import io.trino.spi.procedure.Procedure;
 import io.trino.spi.transaction.IsolationLevel;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.pixelsdb.pixels.trino.impl.PixelsTrinoConfig.getOutputStateKeyPrefix;
 import static java.util.Objects.requireNonNull;
@@ -108,6 +110,12 @@ public class PixelsConnector implements Connector
     public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel,
                                                        boolean readOnly, boolean autoCommit)
     {
+        if (isolationLevel == IsolationLevel.SERIALIZABLE)
+        {
+            throw new TrinoException(
+                    io.trino.spi.StandardErrorCode.NOT_SUPPORTED,
+                    "Pixels transactional INSERT does not support SERIALIZABLE isolation");
+        }
         /**
          * PIXELS-172:
          * Be careful that Presto does not set readOnly to true for normal queries.
@@ -155,12 +163,19 @@ public class PixelsConnector implements Connector
         PixelsTransactionHandle handle = new PixelsTransactionHandle(context.getTransId(), context.getTimestamp(),
                 ingest.enabled() || readOnly, executorType);
         handle.setAutoCommit(autoCommit);
+        handle.setWriteProhibited(readOnly);
         if (ingest.enabled())
         {
             handle.setTimestamp(ingest.client().coordinator().getPublication(com.google.protobuf.Empty.getDefaultInstance()).getPublishedTimestamp());
             ingest.beginRead(handle);
         }
         return handle;
+    }
+
+    @Override
+    public Set<Procedure> getProcedures()
+    {
+        return ingest.procedures();
     }
 
     @Override
@@ -335,6 +350,12 @@ public class PixelsConnector implements Connector
 
     @Override
     public ConnectorPageSinkProvider getPageSinkProvider() { return pageSinkProvider; }
+
+    @Override
+    public boolean isSingleStatementWritesOnly()
+    {
+        return !ingest.enabled();
+    }
 
     @Override
     public ConnectorSplitManager getSplitManager()

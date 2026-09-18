@@ -55,6 +55,7 @@ public final class PixelsMutationWriter
     private enum State { OPEN, FINISHING, FINISHED, FAILED, ABORTED }
 
     private final long transactionId;
+    private final long statementId;
     private final long writerId;
     private final long tableId;
     private final long schemaVersion;
@@ -70,17 +71,19 @@ public final class PixelsMutationWriter
     private Throwable failure;
     private long bufferedBytes;
 
-    public PixelsMutationWriter(long transactionId, long writerId, long tableId,
+    public PixelsMutationWriter(long transactionId, long statementId, long writerId, long tableId,
                                 long schemaVersion, int payloadFormat,
                                 long maxBufferedBytes, int maxStreams,
                                 MutationTransport transport)
     {
-        if (transactionId < 0 || writerId < 0 || tableId < 0 || schemaVersion < 0
+        if (transactionId <= 0 || statementId <= 0 || writerId <= 0 || tableId <= 0
+                || schemaVersion < 0
                 || payloadFormat <= 0 || maxBufferedBytes <= 0 || maxStreams <= 0)
         {
             throw new IllegalArgumentException("Invalid mutation writer configuration");
         }
         this.transactionId = transactionId;
+        this.statementId = statementId;
         this.writerId = writerId;
         this.tableId = tableId;
         this.schemaVersion = schemaVersion;
@@ -106,7 +109,8 @@ public final class PixelsMutationWriter
             {
                 throw new IllegalStateException("Await outstanding appends before exceeding the payload budget");
             }
-            MutationStreamId id = new MutationStreamId(transactionId, writerId, tableId, shardId, kind);
+            MutationStreamId id = new MutationStreamId(
+                    transactionId, statementId, writerId, tableId, shardId, kind);
             Progress progress = streams.get(id);
             if (progress == null && streams.size() >= maxStreams)
             {

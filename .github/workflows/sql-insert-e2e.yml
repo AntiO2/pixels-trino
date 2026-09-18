@@ -24,7 +24,6 @@ jobs:
     timeout-minutes: 35
     env:
       PIXELS_HOME: ${{ github.workspace }}/pixels-home
-      SQL_E2E_WORK_DIR: ${{ github.workspace }}/verification/sql
       INGEST_DAEMON_WORK_DIR: ${{ github.workspace }}/verification/daemon
       SQL_E2E_SKIP_BUILD: '1'
     steps:
@@ -35,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: a2560771fcb167f8c6d8f89d4084ae7b89c098ee
+          ref: 89827c8fbe07d07207c11ca58b507fe5b3839aa4
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -61,7 +60,7 @@ jobs:
           mvn -B -ntp -f pixels/pom.xml \
             -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
             -am -DskipTests=false \
-            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
+            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestExplicitIngestTransaction,TestRetinaPrivateRead,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
             -Dsurefire.failIfNoSpecifiedTests=false -Dmaven.source.skip=true install \
             2>&1 | tee verification/pixels-build.log
           bash pixels/tools/verify-ingest-gc.sh \
@@ -82,9 +81,9 @@ jobs:
             INGEST_DAEMON_SKIP_BUILD=1 \
             bash pixels/tools/verify-ingest-daemon.sh \
             2>&1 | tee verification/normal-daemon.log
-          grep -q '^PIXELS_NORMAL_INGEST_DAEMON_PASS rows=65 pixelsFiles=2 services=TransServer,RetinaServer checkpointRestart=2$' \
+          grep -q '^PIXELS_NORMAL_INGEST_DAEMON_PASS rows=73 pixelsFiles=3 services=TransServer,RetinaServer checkpointRestart=2 sharedFileTransactions=2$' \
             "$INGEST_DAEMON_WORK_DIR/daemon.log"
-          grep -Eq '^PIXELS_NORMAL_INGEST_CUTOVER_PASS oldRows=65 totalRows=66 baseline=1000000000 commitTimestamp=[0-9]+ legacyFence=1$' \
+          grep -Eq '^PIXELS_NORMAL_INGEST_CUTOVER_PASS oldRows=73 totalRows=74 baseline=1000000000 commitTimestamp=[0-9]+ legacyFence=1$' \
             verification/normal-daemon.log
           grep -q '^PIXELS_NORMAL_INGEST_FAIL_CLOSED_PASS corruptDecision=1 missingCheckpoint=1 allocatorFloor=1$' \
             verification/normal-daemon.log
@@ -101,16 +100,55 @@ jobs:
           mvn -B -ntp -f pixels-trino/pom.xml -DskipTests=false \
             -Dtest=TestPixelsMutationWriter -Dsurefire.failIfNoSpecifiedTests=false test \
             2>&1 | tee verification/trino-build.log
-      - name: Execute full SQL INSERT against Retina
+      - name: Execute the representation and acknowledgement SQL matrix
         shell: bash
         run: |
           set -euo pipefail
-          bash pixels-trino/tools/verify-sql-insert.sh "$PWD/pixels" -ntp \
-            2>&1 | tee verification/full-sql.log
-          test "$(cat "$SQL_E2E_WORK_DIR/exit-code")" = 0
-          grep -Eq '(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=1008 trinoWorkers=2( |$)' "$SQL_E2E_WORK_DIR/sql.log"
-          grep -q '^PIXELS_NATIVE_VISIBILITY_PASS iterations=1000$' "$SQL_E2E_WORK_DIR/backend.log"
-          grep -q '^PIXELS_SQL_FIXTURE_STOPPED$' "$SQL_E2E_WORK_DIR/backend.log"
+          file_target_rows=1000000
+          aggregation_transactions=100
+          aggregation_rows_per_transaction=10000
+          production_batch_rows=4096
+          production_batch_bytes=4194304
+          fixture_state_bytes=268435456
+          file_max_delay_ms=600000
+          scale_timeout_seconds=900
+          barrier_timeout_seconds=300
+          for representation in BUFFERED FILE; do
+            for ack in VISIBLE DURABLE; do
+              combination="${representation,,}-${ack,,}"
+              work="$PWD/verification/sql-$combination"
+              expected_rows=1008
+              aggregation=()
+              if [[ "$representation" == FILE && "$ack" == DURABLE ]]; then
+                expected_rows=$((expected_rows + aggregation_transactions * aggregation_rows_per_transaction))
+                aggregation=(
+                  "PIXELS_SQL_FIXTURE_FILE_TARGET_ROWS=$file_target_rows"
+                  "PIXELS_SQL_FIXTURE_FILE_MAX_DELAY_MS=$file_max_delay_ms"
+                  "PIXELS_SQL_FIXTURE_MEMTABLE_ROWS=$production_batch_rows"
+                  "PIXELS_SQL_FIXTURE_MAX_BATCH_ROWS=$production_batch_rows"
+                  "PIXELS_SQL_FIXTURE_MAX_BATCH_BYTES=$production_batch_bytes"
+                  "PIXELS_SQL_FIXTURE_MAX_STATE_BYTES=$fixture_state_bytes"
+                  "PIXELS_SQL_FILE_AGGREGATION_TRANSACTIONS=$aggregation_transactions"
+                  "PIXELS_SQL_FILE_AGGREGATION_ROWS_PER_TRANSACTION=$aggregation_rows_per_transaction"
+                  "SQL_E2E_RUN_FAILURE_SCENARIOS=false"
+                  "SQL_E2E_TIMEOUT_SECONDS=$scale_timeout_seconds"
+                  "SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS=$barrier_timeout_seconds"
+                )
+              fi
+              env \
+                PIXELS_SQL_FIXTURE_REPRESENTATION="$representation" \
+                PIXELS_SQL_FIXTURE_COMMIT_ACK="$ack" \
+                SQL_E2E_WORK_DIR="$work" \
+                SQL_E2E_PASS_PATTERN="(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=$expected_rows trinoWorkers=2( |$)" \
+                "${aggregation[@]}" \
+                bash pixels-trino/tools/verify-sql-insert.sh "$PWD/pixels" -ntp \
+                2>&1 | tee "verification/full-sql-$combination.log"
+              test "$(cat "$work/exit-code")" = 0
+              grep -Eq "(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=$expected_rows trinoWorkers=2( |$)" "$work/sql.log"
+              grep -q '^PIXELS_NATIVE_VISIBILITY_PASS iterations=1000$' "$work/backend.log"
+              grep -q '^PIXELS_SQL_FIXTURE_STOPPED$' "$work/backend.log"
+            done
+          done
       - name: Record SQL verification summary
         if: always()
         shell: bash
@@ -128,11 +166,16 @@ jobs:
             if test -f verification/journal-gc.log; then
               grep -E '^(LocalMutationJournalContract:|Journal GC contract:)' verification/journal-gc.log || true
             fi
-            if test -f "$SQL_E2E_WORK_DIR/sql.log"; then
-              grep -E '(^|[[:space:]])(SQL_PASS |SQL_EXPECTED_REJECTION |FULL_SQL_INSERT_E2E_PASS )' "$SQL_E2E_WORK_DIR/sql.log" || true
-            else
-              echo 'SQL execution was not reached; inspect build logs.'
-            fi
+            for representation in buffered file; do
+              for ack in visible durable; do
+                combination="$representation-$ack"
+                log="verification/sql-$combination/sql.log"
+                if test -f "$log"; then
+                  echo "$combination:"
+                  grep -E '(^|[[:space:]])(JDBC_EXPLICIT_.*_PASS |JDBC_FILE_AGGREGATION_PASS |FULL_SQL_INSERT_E2E_PASS )' "$log" || true
+                fi
+              done
+            done
             echo '```'
             echo
             echo 'Catalog, node directory, and external ID allocation are fixtures. SQL execution, connector, TCP/gRPC, journals, Retina buffers, MainIndex, visibility, and file reads/writes are real.'

@@ -66,6 +66,7 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
         writer =
                 new PixelsMutationWriter(
                         handle.getTransactionId(),
+                        handle.getStatementId(),
                         writerId,
                         table.getTableId(),
                         table.getSchemaVersion(),

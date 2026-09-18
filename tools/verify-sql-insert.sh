@@ -11,11 +11,17 @@ WORK=${SQL_E2E_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/pixels-sql-e2e-XXXXXXXX")}
 SQL_E2E_MAIN_CLASS=${SQL_E2E_MAIN_CLASS:-io.pixelsdb.pixels.trino.testing.FullSqlInsert}
 SQL_E2E_TIMEOUT_SECONDS=${SQL_E2E_TIMEOUT_SECONDS:-180}
 SQL_E2E_BACKEND_HEAP=${SQL_E2E_BACKEND_HEAP:-1g}
+SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS=${SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS:-60}
+SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS=${SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS:-30}
+SQL_E2E_RUN_FAILURE_SCENARIOS=${SQL_E2E_RUN_FAILURE_SCENARIOS:-true}
 SQL_E2E_PASS_PATTERN=${SQL_E2E_PASS_PATTERN:-'(^|[[:space:]])FULL_SQL_INSERT_E2E_PASS checks=[0-9]+ rows=1008 trinoWorkers=2( |$)'}
 if [[ ! "$SQL_E2E_MAIN_CLASS" =~ ^[A-Za-z_][A-Za-z0-9_.]*$ ]] ||
    [[ ! "$SQL_E2E_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "$SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "$SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "$SQL_E2E_RUN_FAILURE_SCENARIOS" =~ ^(true|false)$ ]] ||
    [[ ! "$SQL_E2E_BACKEND_HEAP" =~ ^[1-9][0-9]*[mMgG]$ ]]; then
-    echo "Invalid SQL_E2E_MAIN_CLASS, SQL_E2E_TIMEOUT_SECONDS, or SQL_E2E_BACKEND_HEAP" >&2
+    echo "Invalid SQL E2E main class, timeout, stop timeout, barrier timeout, failure mode, or backend heap" >&2
     exit 2
 fi
 SQL_E2E_MAIN_SOURCE="$TRINO/tools/ingest-contract/sql-runtime/src/main/java/${SQL_E2E_MAIN_CLASS//./\/}.java"
@@ -74,6 +80,8 @@ if [[ -f "$PIXELS_HOME/lib/libjemalloc.so.2" ]]; then
     BACKEND_ENV+=("LD_PRELOAD=$PIXELS_HOME/lib/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}")
 fi
 JAVA_ARGS=(-XX:ActiveProcessorCount=4 --enable-native-access=ALL-UNNAMED
+    "-Dpixels.sql.visibility-barrier-timeout-seconds=$SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS"
+    "-Dpixels.sql.run-failure-scenarios=$SQL_E2E_RUN_FAILURE_SCENARIOS"
     "-XX:ErrorFile=$WORK/hs_err_pid%p.log"
     --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED)
 BACKEND_PID=''
@@ -82,8 +90,8 @@ cleanup() {
     trap - EXIT
     touch "$WORK/stop"
     if [[ -n "$BACKEND_PID" ]]; then
-        for _ in $(seq 1 100); do
-            kill -0 "$BACKEND_PID" 2>/dev/null || break
+        backend_stop_deadline=$((SECONDS + SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS))
+        while kill -0 "$BACKEND_PID" 2>/dev/null && ((SECONDS < backend_stop_deadline)); do
             sleep .1
         done
         if kill -0 "$BACKEND_PID" 2>/dev/null; then
