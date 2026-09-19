@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: 91917fc6d2c4723379a430b289fe2586f41fa873
+          ref: 52e845bdf825bf4c882574de3c9da634bd3056b4
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -60,7 +60,7 @@ jobs:
           mvn -B -ntp -f pixels/pom.xml \
             -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
             -am -DskipTests=false \
-            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestExplicitIngestTransaction,TestRetinaPrivateRead,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
+            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestExplicitIngestTransaction,TestRetinaPrivateRead,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestCoordinatorStateStore,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
             -Dsurefire.failIfNoSpecifiedTests=false -Dmaven.source.skip=true install \
             2>&1 | tee verification/pixels-build.log
           bash pixels/tools/verify-ingest-gc.sh \
@@ -149,6 +149,32 @@ jobs:
               grep -q '^PIXELS_SQL_FIXTURE_STOPPED$' "$work/backend.log"
             done
           done
+      - name: Execute small JDBC transaction benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          transactions=1000
+          warmup_transactions=100
+          concurrency=16
+          file_max_delay_ms=300000
+          for mode in AUTOCOMMIT EXPLICIT; do
+            work="$PWD/verification/small-${mode,,}"
+            env \
+              PIXELS_SQL_FIXTURE_REPRESENTATION=FILE \
+              PIXELS_SQL_FIXTURE_COMMIT_ACK=DURABLE \
+              PIXELS_SQL_FIXTURE_FILE_MAX_DELAY_MS="$file_max_delay_ms" \
+              SMALL_INSERT_CREATE_TABLE=false \
+              SMALL_INSERT_TRANSACTIONS="$transactions" \
+              SMALL_INSERT_WARMUP_TRANSACTIONS="$warmup_transactions" \
+              SMALL_INSERT_CONCURRENCY="$concurrency" \
+              SMALL_INSERT_TRANSACTION_MODE="$mode" \
+              SQL_E2E_MAIN_CLASS=io.pixelsdb.pixels.trino.testing.SmallTransactionsInsert \
+              SQL_E2E_WORK_DIR="$work" \
+              SQL_E2E_TIMEOUT_SECONDS=600 \
+              SQL_E2E_PASS_PATTERN="SMALL_TRANSACTION_INSERT_PASS mode=$mode transactions=$transactions" \
+              bash pixels-trino/tools/verify-sql-insert.sh "$PWD/pixels" -ntp \
+              2>&1 | tee "verification/small-${mode,,}.log"
+          done
       - name: Record SQL verification summary
         if: always()
         shell: bash
@@ -175,6 +201,12 @@ jobs:
                   grep -E '(^|[[:space:]])(JDBC_EXPLICIT_.*_PASS |JDBC_FILE_AGGREGATION_PASS |FULL_SQL_INSERT_E2E_PASS )' "$log" || true
                 fi
               done
+            done
+            for mode in autocommit explicit; do
+              log="verification/small-$mode/sql.log"
+              if test -f "$log"; then
+                grep 'SMALL_TRANSACTION_INSERT_PASS ' "$log" || true
+              fi
             done
             echo '```'
             echo

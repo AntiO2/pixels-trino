@@ -20,9 +20,16 @@ CALL pixels.system.flush_visible_barrier(timeout_seconds => 30);
 ~~~
 
 The barrier captures its committed boundary when called and does not wait for
-later transactions or global idleness.
+later transactions or global idleness. `retina.ingest.file.max.delay.ms`
+controls how long an underfilled FILE tail may remain open during normal
+background aggregation. The barrier is different: it closes every tail needed
+by the captured boundary immediately. Bulk loaders should therefore use
+FILE+DURABLE, allow transactions to aggregate, and issue one barrier after the
+last accepted transaction instead of one barrier per transaction.
 
-Installation reuses existing Retina write buffers and pixels-index:
+BUFFERED installation reuses existing Retina write buffers. FILE installation
+writes bounded row batches directly through PixelsWriter and never exposes a
+public MemTable copy. Both representations reuse pixels-index:
 
 - MainIndex: rowId -> RowLocation;
 - supported primary and non-unique SinglePointIndex membership;
@@ -72,6 +79,11 @@ retina.ingest.participant.wal.dir=/absolute/state/wal
 retina.ingest.cutover.baseline.timestamp=0
 retina.ingest.write.representation=BUFFERED
 retina.ingest.commit.ack=VISIBLE
+retina.ingest.file.target.rows=1000000
+retina.ingest.file.max.bytes=536870912
+retina.ingest.file.max.delay.ms=30000
+retina.ingest.file.pixel.stride=10000
+retina.ingest.coordinator.compaction.bytes=16777216
 retina.ingest.max.transactions=10000
 retina.ingest.terminal.retention.ms=86400000
 retina.ingest.terminal.max.transactions=100000
@@ -85,6 +97,11 @@ persistent local volumes owned by exactly one live process. The credential must
 contain 24–4096 visible ASCII bytes after trimming; deploy it with owner-only
 permissions. RPC transport is plaintext, so use a trusted network or external
 TLS boundary.
+
+The coordinator stores transaction changes in a checksummed incremental log
+and periodically replaces it with an atomic checkpoint at
+`retina.ingest.coordinator.compaction.bytes`. Confirmed corrupt records fail
+startup; an incomplete trailing record is discarded during recovery.
 
 Start the coordinator role before the Retina role. Do not route INSERTs until
 Retina reports:
@@ -309,6 +326,30 @@ range in a partially imported table after an interruption. A non-empty partial
 range fails closed because each range is one atomic transaction. The prepared-row
 and WAL limits must be sized for the largest
 observed transaction before starting the run.
+
+### Small transaction benchmark
+
+`SmallTransactionsInsert` drives independent INSERTs through Trino JDBC and
+reports the accepted boundary separately from the final visibility barrier:
+
+~~~sh
+JAVA_HOME=/path/to/jdk-23 \
+SMALL_INSERT_TRANSACTIONS=1000 \
+SMALL_INSERT_CONCURRENCY=16 \
+SMALL_INSERT_TRANSACTION_MODE=AUTOCOMMIT \
+bash tools/benchmark-small-inserts.sh \
+  jdbc:trino://127.0.0.1:18081 benchmark_schema events pixels
+~~~
+
+Set `SMALL_INSERT_TRANSACTION_MODE=EXPLICIT` to execute each INSERT followed by
+JDBC `commit()` on the same connection. On the September 19, 2026 local
+two-worker FILE+DURABLE run, 1000 measured single-row transactions plus 100
+warmups formed one Pixels file:
+
+| Mode | Accepted | Accepted throughput | Commit P50 | Visible throughput |
+|---|---:|---:|---:|---:|
+| AUTOCOMMIT | 20.746 s | 48.20 rows/s | 303.000 ms | 45.05 rows/s |
+| EXPLICIT | 20.669 s | 48.38 rows/s | 312.307 ms | 45.22 rows/s |
 
 Run the second command after the configured buffer flush interval and again
 after stopping and restarting the normal Coordinator and Retina JVMs. It
