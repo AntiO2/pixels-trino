@@ -9,12 +9,14 @@
  */
 package io.pixelsdb.pixels.trino.testing;
 
+import io.trino.execution.QueryManager;
 import io.trino.jdbc.QueryStats;
 import io.trino.jdbc.TrinoStatement;
 import io.trino.metadata.HandleResolver;
 import io.trino.server.PluginClassLoader;
 import io.trino.server.PluginManager;
 import io.trino.spi.Plugin;
+import io.trino.spi.QueryId;
 import io.trino.testing.DistributedQueryRunner;
 
 import java.net.URL;
@@ -26,8 +28,10 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -67,6 +71,11 @@ public final class SmallTransactionsInsert
             throw new IllegalArgumentException(
                     "Usage: SmallTransactionsInsert jdbc-url schema table user");
         }
+        runBenchmark(args, null);
+    }
+
+    private static void runBenchmark(String[] args, QueryManager diagnostics) throws Exception
+    {
         String jdbcUrl = args[0];
         String schema = identifier(args[1]);
         String table = identifier(args[2]);
@@ -106,12 +115,12 @@ public final class SmallTransactionsInsert
 
         runTransactions(
                 jdbcUrl, user, qualifiedTable, mode, warmupTransactions,
-                rowsPerTransaction, concurrency, -warmupTransactions);
+                rowsPerTransaction, concurrency, -warmupTransactions, null);
 
         long startNanos = System.nanoTime();
         TransactionMeasurements measurements = runTransactions(
                 jdbcUrl, user, qualifiedTable, mode, transactions,
-                rowsPerTransaction, concurrency, 0);
+                rowsPerTransaction, concurrency, 0, diagnostics);
         long acceptedNanos = System.nanoTime() - startNanos;
         long acceptedRows = Math.multiplyExact((long) transactions, rowsPerTransaction);
 
@@ -143,12 +152,16 @@ public final class SmallTransactionsInsert
 
         Collections.sort(measurements.clientLatencies);
         Collections.sort(measurements.queryElapsedTimes);
+        Collections.sort(measurements.queryQueuedTimes);
+        Collections.sort(measurements.queryCpuTimes);
+        Collections.sort(measurements.explicitCommitTimes);
         double acceptedSeconds = acceptedNanos / 1_000_000_000.0;
         String result = String.format(Locale.ROOT,
                 "SMALL_TRANSACTION_INSERT_PASS mode=%s transactions=%d rowsPerTransaction=%d "
                         + "concurrency=%d acceptedRows=%d acceptedMs=%.3f acceptedRowsPerSecond=%.2f "
                         + "commitP50Ms=%.3f commitP95Ms=%.3f commitP99Ms=%.3f "
                         + "queryElapsedP50Ms=%.3f queryElapsedP95Ms=%.3f "
+                        + "queryQueuedP50Ms=%.3f queryCpuP50Ms=%.3f explicitCommitP50Ms=%.3f "
                         + "commitToVisibleMs=%.3f",
                 mode, transactions, rowsPerTransaction, concurrency, acceptedRows,
                 acceptedNanos / 1_000_000.0, acceptedRows / acceptedSeconds,
@@ -157,8 +170,21 @@ public final class SmallTransactionsInsert
                 percentileMillis(measurements.clientLatencies, 99),
                 percentileMillis(measurements.queryElapsedTimes, 50),
                 percentileMillis(measurements.queryElapsedTimes, 95),
+                percentileMillis(measurements.queryQueuedTimes, 50),
+                percentileMillis(measurements.queryCpuTimes, 50),
+                measurements.explicitCommitTimes.isEmpty() ? 0.0
+                        : percentileMillis(measurements.explicitCommitTimes, 50),
                 visibleAfterAcceptedNanos / 1_000_000.0);
         System.out.println(result);
+        for (Map.Entry<String, List<Long>> phase : measurements.phases.entrySet())
+        {
+            Collections.sort(phase.getValue());
+            System.out.println(String.format(Locale.ROOT,
+                    "SMALL_QUERY_PHASE phase=%s samples=%d p50Ms=%.3f p95Ms=%.3f",
+                    phase.getKey(), phase.getValue().size(),
+                    percentileMillis(phase.getValue(), 50),
+                    percentileMillis(phase.getValue(), 95)));
+        }
     }
 
     private static TransactionMeasurements runTransactions(
@@ -169,7 +195,8 @@ public final class SmallTransactionsInsert
             int transactions,
             int rowsPerTransaction,
             int concurrency,
-            int transactionBase) throws Exception
+            int transactionBase,
+            QueryManager diagnostics) throws Exception
     {
         if (transactions == 0)
         {
@@ -177,6 +204,13 @@ public final class SmallTransactionsInsert
         }
         AtomicLong next = new AtomicLong();
         TransactionMeasurements measurements = new TransactionMeasurements();
+        if (diagnostics != null)
+        {
+            for (String phase : new String[] {"analysis", "planning", "starting", "execution", "finishing"})
+            {
+                measurements.phases.put(phase, Collections.synchronizedList(new ArrayList<>()));
+            }
+        }
         ExecutorService executor = Executors.newFixedThreadPool(Math.min(concurrency, transactions));
         List<Future<Void>> workers = new ArrayList<>();
         for (int clientId = 0; clientId < Math.min(concurrency, transactions); clientId++)
@@ -205,7 +239,9 @@ public final class SmallTransactionsInsert
                             statement.executeUpdate(sql);
                             if (mode == TransactionMode.EXPLICIT)
                             {
+                                long commitStart = System.nanoTime();
                                 connection.commit();
+                                measurements.explicitCommitTimes.add(System.nanoTime() - commitStart);
                             }
                         }
                         catch (Exception e)
@@ -224,6 +260,20 @@ public final class SmallTransactionsInsert
                         }
                         measurements.queryElapsedTimes.add(
                                 TimeUnit.MILLISECONDS.toNanos(completed.getElapsedTimeMillis()));
+                        measurements.queryQueuedTimes.add(
+                                TimeUnit.MILLISECONDS.toNanos(completed.getQueuedTimeMillis()));
+                        measurements.queryCpuTimes.add(
+                                TimeUnit.MILLISECONDS.toNanos(completed.getCpuTimeMillis()));
+                        if (diagnostics != null)
+                        {
+                            io.trino.execution.QueryStats stats = diagnostics
+                                    .getFullQueryInfo(new QueryId(completed.getQueryId())).getQueryStats();
+                            measurements.phases.get("analysis").add(stats.getAnalysisTime().roundTo(TimeUnit.NANOSECONDS));
+                            measurements.phases.get("planning").add(stats.getPlanningTime().roundTo(TimeUnit.NANOSECONDS));
+                            measurements.phases.get("starting").add(stats.getStartingTime().roundTo(TimeUnit.NANOSECONDS));
+                            measurements.phases.get("execution").add(stats.getExecutionTime().roundTo(TimeUnit.NANOSECONDS));
+                            measurements.phases.get("finishing").add(stats.getFinishingTime().roundTo(TimeUnit.NANOSECONDS));
+                        }
                     }
                 }
             }));
@@ -242,9 +292,16 @@ public final class SmallTransactionsInsert
 
     private static final class TransactionMeasurements
     {
+        private final Map<String, List<Long>> phases = new LinkedHashMap<>();
         private final List<Long> clientLatencies =
                 Collections.synchronizedList(new ArrayList<>());
         private final List<Long> queryElapsedTimes =
+                Collections.synchronizedList(new ArrayList<>());
+        private final List<Long> queryQueuedTimes =
+                Collections.synchronizedList(new ArrayList<>());
+        private final List<Long> queryCpuTimes =
+                Collections.synchronizedList(new ArrayList<>());
+        private final List<Long> explicitCommitTimes =
                 Collections.synchronizedList(new ArrayList<>());
     }
 
@@ -355,7 +412,9 @@ public final class SmallTransactionsInsert
                     java.util.Map.of("cloud.function.switch", "off", "insert.enabled", "true"));
             String jdbcUrl = runner.getCoordinator().getBaseUrl().toString()
                     .replaceFirst("^http", "jdbc:trino") + "/pixels/s";
-            main(new String[] {jdbcUrl, "s", "t", "pixels-small-insert"});
+            runBenchmark(new String[] {jdbcUrl, "s", "t", "pixels-small-insert"},
+                    Boolean.parseBoolean(environment("SMALL_INSERT_QUERY_DIAGNOSTICS", "false"))
+                            ? runner.getCoordinator().getQueryManager() : null);
         }
     }
 }

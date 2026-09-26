@@ -462,6 +462,58 @@ warmups formed one Pixels file:
 | AUTOCOMMIT | 19.950 s | 50.13 rows/s | 285.772 ms | 2,855.058 ms |
 | EXPLICIT | 20.127 s | 49.69 rows/s | 297.985 ms | 2,621.465 ms |
 
+September 26 rerun on Pixels `b66e3151` and connector `3dee5d2`, using fresh
+FILE+DURABLE fixtures, four vnodes, two Trino workers, concurrency 16,
+100 warmups and 1000 measured single-row transactions:
+
+| Mode | Accepted | Transactions/s | Commit P50 | Commit P99 | Commit-to-visible |
+|---|---:|---:|---:|---:|---:|
+| AUTOCOMMIT | 19.820 s | 50.45 | 305.838 ms | 597.800 ms | 2,601.967 ms |
+| EXPLICIT | 18.840 s | 53.08 | 287.614 ms | 583.512 ms | 2,551.180 ms |
+
+Run with `SQL_E2E_MAIN_CLASS=io.pixelsdb.pixels.trino.testing.SmallTransactionsInsert`,
+`SQL_E2E_PASS_PATTERN=SMALL_TRANSACTION_INSERT_PASS`,
+`SMALL_INSERT_CREATE_TABLE=false`, `SMALL_INSERT_TRANSACTIONS=1000`,
+`SMALL_INSERT_CONCURRENCY=16` and the selected
+`SMALL_INSERT_TRANSACTION_MODE=AUTOCOMMIT|EXPLICIT` through
+`tools/verify-sql-insert.sh`. Set `PIXELS_SQL_FIXTURE_REPRESENTATION=FILE`,
+`PIXELS_SQL_FIXTURE_COMMIT_ACK=DURABLE`, `PIXELS_SQL_FIXTURE_ROUTE_COUNT=4`,
+`PIXELS_SQL_FIXTURE_FILE_MAX_DELAY_MS=300000`, `SQL_E2E_BACKEND_HEAP=2g`
+and `SQL_E2E_TIMEOUT_SECONDS=1800`. Use a fresh `SQL_E2E_WORK_DIR` per run.
+The JDBC harness validates final count and ID sum; both modes produced four
+files. Evidence is in `/tmp/pixels-small-autocommit-20260926` and
+`/tmp/pixels-small-explicit-20260926`.
+
+Small-transaction throughput has not materially improved with the bulk-path
+optimizations. Profile query planning/scheduling and transaction RPC stages
+separately before attributing its fixed cost to fsync. For pipeline design,
+[RocksDB pipelined writes](https://github.com/facebook/rocksdb/wiki/Pipelined-Write)
+illustrate overlapping the next WAL group with installation of the previous
+group. In FILE mode the installation stage remains direct file materialization:
+`TestPixelsIngestStorage` asserts unchanged shared MemTable row counts and no
+new object-staging blocks across two FILE transaction contributions.
+
+The diagnostic rerun in `/tmp/pixels-small-stages-20260926` additionally records
+JDBC-reported query queued/CPU time and the explicit `Connection.commit()` call
+separately. For 1000 explicit single-row transactions it measured 50.58
+transactions/s, client P50 299.593 ms, INSERT query elapsed P50 258 ms,
+queued P50 0 ms, query CPU P50 2 ms and explicit commit P50 33.758 ms.
+These separate percentiles are not additive; query CPU is not coordinator
+planning time. The run used the FILE writer's reusable per-file column batch,
+which also passed the real-storage test and 40-check FILE+DURABLE SQL regression
+(`/tmp/pixels-vector-file-sql-20260926`). No small-transaction throughput gain
+is established by this change.
+
+Set `SMALL_INSERT_QUERY_DIAGNOSTICS=true` for the embedded JDBC harness to
+capture engine query phases after each measured INSERT. It remains disabled
+for normal benchmark runs and external JDBC deployments. The diagnostic run
+`/tmp/pixels-small-query-phases-20260926` collected 1000 samples: planning P50
+40.549 ms, starting P50 0.791 ms, execution P50 218.546 ms and finishing P50
+0.128 ms. Analysis P50 was 35.367 ms. Trino 466 measures execution from the
+start of planning through query end, so these phase statistics overlap and
+must not be added. Execution includes waiting, not just task CPU. The next profiling target is worker scheduling and
+per-RPC latency within execution, rather than assuming that WAL flush dominates.
+
 Run the second command after the configured buffer flush interval and again
 after stopping and restarting the normal Coordinator and Retina JVMs. It
 compares row counts and an order-independent checksum of every column. Before
