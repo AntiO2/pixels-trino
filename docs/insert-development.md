@@ -90,6 +90,9 @@ retina.ingest.terminal.max.transactions=100000
 retina.ingest.wal.segment.bytes=67108864
 retina.ingest.wal.max.bytes=4294967296
 retina.ingest.wal.max.records=10000000
+retina.ingest.wal.group.commit.delay.micros=200
+retina.ingest.wal.read.cache.max.bytes=67108864
+retina.ingest.coordinator.group.commit.delay.micros=200
 ~~~
 
 The three state directories must be absolute, pairwise non-overlapping,
@@ -98,10 +101,18 @@ contain 24–4096 visible ASCII bytes after trimming; deploy it with owner-only
 permissions. RPC transport is plaintext, so use a trusted network or external
 TLS boundary.
 
+The WAL read cache is private to the Retina owner and bounded by bytes; it
+avoids rereading recently appended batches during installation and private
+reads. A sealed batch is served only after its WAL seal is durable. Evicted
+batches and batches recovered after restart are read from the WAL.
+
 The coordinator stores transaction changes in a checksummed incremental log
 and periodically replaces it with an atomic checkpoint at
 `retina.ingest.coordinator.compaction.bytes`. Confirmed corrupt records fail
 startup; an incomplete trailing record is discarded during recovery.
+The two bounded group-commit delays let concurrent seal and decision writers
+share one local synchronization. A zero value disables the wait without
+weakening the synchronized COMMIT boundary.
 
 Start the coordinator role before the Retina role. Do not route INSERTs until
 Retina reports:
@@ -150,8 +161,11 @@ durable handoff is:
    MainIndex, supported business indexes and checkpoint coverage.
 3. Full batch plans are atomically replaced by compact transaction checkpoints
    containing table identity, commit timestamp, row-id ranges and covered files.
-4. The participant then writes CHECKPOINTED and compacts live WAL records into
-   a new generation. Its pointer is durable before an old WAL is deleted.
+4. The participant durably writes CHECKPOINTED and evicts the transaction's
+   cached payload. Background reclamation groups retired transactions and copies
+   live records into a new generation once retired payload bytes reach live
+   payload bytes. Its pointer is durable before an old WAL is deleted. A restart
+   between the fence and reclamation preserves both the fence and live inputs.
 5. The coordinator retires PUBLISHED/ABORTED decisions only after every owner
    acknowledges checkpoint/discard.
 
@@ -230,6 +244,10 @@ bash tools/verify-sql-insert.sh /path/to/matching/pixels
 
 Use SQL_E2E_SKIP_BUILD=1 only after both projects and native runtime were rebuilt
 from exact checked-out sources. SQL_E2E_WORK_DIR selects the evidence directory.
+`SQL_E2E_ENGINE_HEAP` (default `3g`) and `SQL_E2E_BACKEND_HEAP` (default `1g`)
+size the independent Trino and Retina JVMs. Large-file benchmarks must budget
+for concurrent file readers as well as ingestion; the SF10 profile uses `8g`
+for the engine and `6g` for Retina.
 
 The harness uses real Trino 466 coordinator/two-worker servers, actual plugin
 classloader and connector, TCP/gRPC, decisions/journals, Retina MemTables,
@@ -327,6 +345,99 @@ range fails closed because each range is one atomic transaction. The prepared-ro
 and WAL limits must be sized for the largest
 observed transaction before starting the run.
 
+### SF10 ingestion and native writer comparison
+
+The representative benchmark projects `lineitem` to `(orderkey, comment)`
+and `store_sales` to `(ss_ticket_number, ss_item_sk-as-text)`, with a dataset
+prefix on the text column. These results measure those two-column projections.
+`INSERT_BENCHMARK_STAGE_SOURCE=true` materializes each projection in Trino's
+memory catalog before the ingestion timer, avoiding repeated data generation
+for concurrent key ranges. Staging and final checksum verification are timed
+separately. The default `false` reads the generators directly.
+
+Use fresh work directories for every measurement. With matching artifacts
+already built under JDK 8 (Pixels) and JDK 23 (Trino), run under JDK 23:
+
+~~~sh
+export PIXELS_HOME=/path/to/matching/runtime
+SQL_E2E_SKIP_BUILD=1 SQL_E2E_WORK_DIR=/tmp/insert-sf10-fresh \
+SQL_E2E_TIMEOUT_SECONDS=14400 \
+SQL_E2E_ENGINE_HEAP=8g SQL_E2E_BACKEND_HEAP=6g \
+SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS=180 \
+TPCH_SCHEMA=sf10 TPCDS_SCHEMA=sf10 \
+INSERT_BENCHMARK_STAGE_SOURCE=true \
+INSERT_BENCHMARK_CONCURRENCY=8 INSERT_BENCHMARK_TRANSACTION_ROWS=5000000 \
+INSERT_BENCHMARK_VISIBILITY_TIMEOUT_SECONDS=7200 \
+PIXELS_SQL_FIXTURE_REPRESENTATION=FILE PIXELS_SQL_FIXTURE_COMMIT_ACK=DURABLE \
+PIXELS_SQL_FIXTURE_ROUTE_COUNT=4 PIXELS_SQL_FIXTURE_MAX_BATCH_ROWS=65536 \
+PIXELS_SQL_FIXTURE_MAX_BATCH_BYTES=16777216 \
+PIXELS_SQL_FIXTURE_MAX_PREPARED_ROWS=10000000 \
+PIXELS_SQL_FIXTURE_MAX_STATE_BYTES=1073741824 \
+PIXELS_SQL_FIXTURE_WAL_MAX_BYTES=68719476736 \
+PIXELS_SQL_FIXTURE_WAL_MAX_RECORDS=100000000 \
+PIXELS_SQL_FIXTURE_WAL_READ_CACHE_MAX_BYTES=268435456 \
+PIXELS_SQL_FIXTURE_FILE_TARGET_ROWS=4000000 \
+PIXELS_SQL_FIXTURE_FILE_MAX_BYTES=134217728 \
+PIXELS_SQL_FIXTURE_FILE_MAX_DELAY_MS=300000 \
+bash tools/benchmark-tpch-tpcds-insert.sh /path/to/pixels
+
+# Build pixels-cli with JDK 8 first; execute this harness with JDK 23.
+bash tools/benchmark-native-load.sh /path/to/pixels \
+  /tmp/insert-sf10-fresh tpch /tmp/native-tpch-fresh
+bash tools/benchmark-native-load.sh /path/to/pixels \
+  /tmp/insert-sf10-fresh tpcds /tmp/native-tpcds-fresh
+~~~
+
+The native comparison exports the verified projection before its timer, then
+runs the existing CLI `SimplePixelsConsumer` with four threads and real
+PixelsWriter output. Metadata uses the catalog fixture. CSV preparation is
+excluded, input is warm, and output footer row counts are checked. This baseline
+does not perform transactional WAL or MainIndex installation.
+
+September 26, 2026, Pixels `b66e3151d6d6a7e072a31155e04b42f84bc03479`,
+two Trino workers, one Retina owner, four vnodes, staged input:
+
+| Projection | Rows | DURABLE accepted | Accepted rows/s | Commit-to-visible | Start-to-visible | CLI writer |
+|---|---:|---:|---:|---:|---:|---:|
+| TPC-H SF10 lineitem | 59,986,052 | 27.910 s | 2,149,214 | 49.768 s | 77.678 s | 26.156 s |
+| TPC-DS SF10 store_sales | 28,800,991 | 8.412 s | 3,423,594 | 14.932 s | 23.344 s | 6.798 s |
+
+Accepted time ends after all INSERTs return with durable COMMIT decisions.
+Commit-to-visible starts there and ends when the fixed-boundary barrier returns.
+It is a latency, not a throughput. Source staging took 4.798 s and 15.276 s;
+verification took 49.647 s and 40.237 s respectively. Both count and
+order-independent all-projected-column checksums matched. This comparison still
+shows a 2.97x / 3.43x start-to-visible gap against the CLI writer.
+
+The optimized path uses a bounded private batch cache after durable sealing,
+batch MainIndex installation for fresh allocations, cached batch type parsing,
+and grouped WAL reclamation. Recovery retains exact-location verification;
+cache misses and restarts read the WAL. Further profiling should target batch
+allocation/encoding and MainIndex-buffer installation before increasing queue
+limits or reporting accepted throughput as completed materialization.
+
+Validation for this revision:
+
+- `verify-sql-insert.sh` passed all four `BUFFERED|FILE` × `VISIBLE|DURABLE`
+  configurations, each with 40 checks and explicit/autocommit statements.
+- Pixels `verify-ingest-gc.sh` passed 19 journal cases and 13 GC cases,
+  including five crash boundaries.
+- Pixels `verify-ingest-daemon.sh` passed checkpoint/restart, shared-file
+  recovery, offline cutover and corrupt/missing-state rejection using normal
+  TransServer and RetinaServer services.
+- JDK 8 Maven tests `TestLocalMutationJournal,TestRetinaPrivateRead,`
+  `TestRetinaIngestParticipantCheckpoint,TestPixelsIngestStorage,`
+  `TestCoordinatorStateStore,TestCoordinatorDurabilityBoundaries` passed
+  (27 tests) with `-DskipTests=false -Dsurefire.failIfNoSpecifiedTests=false`
+  and `-pl pixels-daemon -am`.
+
+The SF10 evidence directory is `/tmp/pixels-staged-sf10-20260926`, containing
+`sql.log`, `backend.log`, `status.properties` and `exit-code=0`. The native
+results are in `/tmp/pixels-native-tpch-sf10-final-20260926/load.log` and
+`/tmp/pixels-native-tpcds-sf10-20260926/load.log`. SQL and daemon evidence use
+the `/tmp/pixels-group-gc-*-20260926` directories. These are local evidence
+paths; the commands above reproduce the benchmark in a fresh directory.
+
 ### Small transaction benchmark
 
 `SmallTransactionsInsert` drives independent INSERTs through Trino JDBC and
@@ -346,10 +457,10 @@ JDBC `commit()` on the same connection. On the September 19, 2026 local
 two-worker FILE+DURABLE run, 1000 measured single-row transactions plus 100
 warmups formed one Pixels file:
 
-| Mode | Accepted | Accepted throughput | Commit P50 | Visible throughput |
+| Mode | Accepted | Accepted throughput | Commit P50 | Commit-to-visible latency |
 |---|---:|---:|---:|---:|
-| AUTOCOMMIT | 20.746 s | 48.20 rows/s | 303.000 ms | 45.05 rows/s |
-| EXPLICIT | 20.669 s | 48.38 rows/s | 312.307 ms | 45.22 rows/s |
+| AUTOCOMMIT | 19.950 s | 50.13 rows/s | 285.772 ms | 2,855.058 ms |
+| EXPLICIT | 20.127 s | 49.69 rows/s | 297.985 ms | 2,621.465 ms |
 
 Run the second command after the configured buffer flush interval and again
 after stopping and restarting the normal Coordinator and Retina JVMs. It

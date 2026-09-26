@@ -11,6 +11,7 @@ WORK=${SQL_E2E_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/pixels-sql-e2e-XXXXXXXX")}
 SQL_E2E_MAIN_CLASS=${SQL_E2E_MAIN_CLASS:-io.pixelsdb.pixels.trino.testing.FullSqlInsert}
 SQL_E2E_TIMEOUT_SECONDS=${SQL_E2E_TIMEOUT_SECONDS:-180}
 SQL_E2E_BACKEND_HEAP=${SQL_E2E_BACKEND_HEAP:-1g}
+SQL_E2E_ENGINE_HEAP=${SQL_E2E_ENGINE_HEAP:-3g}
 SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS=${SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS:-60}
 SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS=${SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS:-30}
 SQL_E2E_RUN_FAILURE_SCENARIOS=${SQL_E2E_RUN_FAILURE_SCENARIOS:-true}
@@ -20,7 +21,8 @@ if [[ ! "$SQL_E2E_MAIN_CLASS" =~ ^[A-Za-z_][A-Za-z0-9_.]*$ ]] ||
    [[ ! "$SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    [[ ! "$SQL_E2E_VISIBILITY_BARRIER_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    [[ ! "$SQL_E2E_RUN_FAILURE_SCENARIOS" =~ ^(true|false)$ ]] ||
-   [[ ! "$SQL_E2E_BACKEND_HEAP" =~ ^[1-9][0-9]*[mMgG]$ ]]; then
+   [[ ! "$SQL_E2E_BACKEND_HEAP" =~ ^[1-9][0-9]*[mMgG]$ ]] ||
+   [[ ! "$SQL_E2E_ENGINE_HEAP" =~ ^[1-9][0-9]*[mMgG]$ ]]; then
     echo "Invalid SQL E2E main class, timeout, stop timeout, barrier timeout, failure mode, or backend heap" >&2
     exit 2
 fi
@@ -119,6 +121,13 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT
+terminate_on_signal() {
+    local status=$1
+    trap - INT TERM
+    exit "$status"
+}
+trap 'terminate_on_signal 130' INT
+trap 'terminate_on_signal 143' TERM
 
 # Capture failures that occur before the backend reaches its Java main method.
 "${BACKEND_ENV[@]}" java "${JAVA_ARGS[@]}" -version > "$WORK/runtime.log" 2>&1
@@ -139,7 +148,7 @@ for _ in $(seq 1 300); do
 done
 [[ -f "$WORK/ready" ]] || { echo "Backend readiness deadline exceeded" >&2; exit 1; }
 export PIXELS_CONFIG="$WORK/pixels.properties"
-timeout -k 10s "${SQL_E2E_TIMEOUT_SECONDS}s" java "${JAVA_ARGS[@]}" -Xmx3g \
+timeout -k 10s "${SQL_E2E_TIMEOUT_SECONDS}s" java "${JAVA_ARGS[@]}" "-Xmx$SQL_E2E_ENGINE_HEAP" \
     -cp "$WORK/driver-classes:$(cat "$WORK/engine.cp")" \
     "$SQL_E2E_MAIN_CLASS" "$WORK" "$WORK/plugin.cp" > "$WORK/sql.log" 2>&1
 cat "$WORK/sql.log"

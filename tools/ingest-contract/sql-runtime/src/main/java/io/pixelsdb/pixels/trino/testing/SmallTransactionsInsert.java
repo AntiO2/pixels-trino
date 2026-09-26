@@ -9,6 +9,8 @@
  */
 package io.pixelsdb.pixels.trino.testing;
 
+import io.trino.jdbc.QueryStats;
+import io.trino.jdbc.TrinoStatement;
 import io.trino.metadata.HandleResolver;
 import io.trino.server.PluginClassLoader;
 import io.trino.server.PluginManager;
@@ -32,6 +34,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
 
@@ -106,7 +109,7 @@ public final class SmallTransactionsInsert
                 rowsPerTransaction, concurrency, -warmupTransactions);
 
         long startNanos = System.nanoTime();
-        List<Long> latencies = runTransactions(
+        TransactionMeasurements measurements = runTransactions(
                 jdbcUrl, user, qualifiedTable, mode, transactions,
                 rowsPerTransaction, concurrency, 0);
         long acceptedNanos = System.nanoTime() - startNanos;
@@ -138,24 +141,27 @@ public final class SmallTransactionsInsert
             }
         }
 
-        Collections.sort(latencies);
+        Collections.sort(measurements.clientLatencies);
+        Collections.sort(measurements.queryElapsedTimes);
         double acceptedSeconds = acceptedNanos / 1_000_000_000.0;
-        double totalVisibleSeconds =
-                (acceptedNanos + visibleAfterAcceptedNanos) / 1_000_000_000.0;
         String result = String.format(Locale.ROOT,
                 "SMALL_TRANSACTION_INSERT_PASS mode=%s transactions=%d rowsPerTransaction=%d "
                         + "concurrency=%d acceptedRows=%d acceptedMs=%.3f acceptedRowsPerSecond=%.2f "
                         + "commitP50Ms=%.3f commitP95Ms=%.3f commitP99Ms=%.3f "
-                        + "visibleAfterAcceptedMs=%.3f visibleRowsPerSecond=%.2f",
+                        + "queryElapsedP50Ms=%.3f queryElapsedP95Ms=%.3f "
+                        + "commitToVisibleMs=%.3f",
                 mode, transactions, rowsPerTransaction, concurrency, acceptedRows,
                 acceptedNanos / 1_000_000.0, acceptedRows / acceptedSeconds,
-                percentileMillis(latencies, 50), percentileMillis(latencies, 95),
-                percentileMillis(latencies, 99), visibleAfterAcceptedNanos / 1_000_000.0,
-                acceptedRows / totalVisibleSeconds);
+                percentileMillis(measurements.clientLatencies, 50),
+                percentileMillis(measurements.clientLatencies, 95),
+                percentileMillis(measurements.clientLatencies, 99),
+                percentileMillis(measurements.queryElapsedTimes, 50),
+                percentileMillis(measurements.queryElapsedTimes, 95),
+                visibleAfterAcceptedNanos / 1_000_000.0);
         System.out.println(result);
     }
 
-    private static List<Long> runTransactions(
+    private static TransactionMeasurements runTransactions(
             String jdbcUrl,
             String user,
             String qualifiedTable,
@@ -167,10 +173,10 @@ public final class SmallTransactionsInsert
     {
         if (transactions == 0)
         {
-            return new ArrayList<>();
+            return new TransactionMeasurements();
         }
         AtomicLong next = new AtomicLong();
-        List<Long> latencies = Collections.synchronizedList(new ArrayList<>(transactions));
+        TransactionMeasurements measurements = new TransactionMeasurements();
         ExecutorService executor = Executors.newFixedThreadPool(Math.min(concurrency, transactions));
         List<Future<Void>> workers = new ArrayList<>();
         for (int clientId = 0; clientId < Math.min(concurrency, transactions); clientId++)
@@ -179,6 +185,8 @@ public final class SmallTransactionsInsert
                 try (Connection connection = connection(jdbcUrl, user);
                         Statement statement = connection.createStatement())
                 {
+                    AtomicReference<QueryStats> queryStats = new AtomicReference<>();
+                    ((TrinoStatement) statement).setProgressMonitor(queryStats::set);
                     connection.setAutoCommit(mode == TransactionMode.AUTOCOMMIT);
                     while (true)
                     {
@@ -191,6 +199,7 @@ public final class SmallTransactionsInsert
                         String sql = insertSql(
                                 qualifiedTable, transactionId, rowsPerTransaction);
                         long start = System.nanoTime();
+                        queryStats.set(null);
                         try
                         {
                             statement.executeUpdate(sql);
@@ -207,7 +216,14 @@ public final class SmallTransactionsInsert
                             }
                             throw e;
                         }
-                        latencies.add(System.nanoTime() - start);
+                        measurements.clientLatencies.add(System.nanoTime() - start);
+                        QueryStats completed = queryStats.get();
+                        if (completed == null)
+                        {
+                            throw new IllegalStateException("Trino query statistics are absent");
+                        }
+                        measurements.queryElapsedTimes.add(
+                                TimeUnit.MILLISECONDS.toNanos(completed.getElapsedTimeMillis()));
                     }
                 }
             }));
@@ -221,7 +237,15 @@ public final class SmallTransactionsInsert
         {
             throw new IllegalStateException("Small transaction workers did not terminate");
         }
-        return latencies;
+        return measurements;
+    }
+
+    private static final class TransactionMeasurements
+    {
+        private final List<Long> clientLatencies =
+                Collections.synchronizedList(new ArrayList<>());
+        private final List<Long> queryElapsedTimes =
+                Collections.synchronizedList(new ArrayList<>());
     }
 
     private static String insertSql(

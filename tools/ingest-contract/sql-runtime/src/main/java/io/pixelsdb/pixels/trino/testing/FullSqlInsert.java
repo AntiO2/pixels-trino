@@ -145,15 +145,13 @@ public final class FullSqlInsert {
         equal(filesAfter - filesBefore, 1,
                 "compatible FILE transactions share one output file");
         long acceptedMillis = TimeUnit.NANOSECONDS.toMillis(acceptedEnd - acceptedStart);
-        long visibleMillis = TimeUnit.NANOSECONDS.toMillis(visibleEnd - acceptedStart);
+        long commitToVisibleMillis = TimeUnit.NANOSECONDS.toMillis(visibleEnd - acceptedEnd);
         double acceptedRowsPerSecond = rows * 1_000_000_000.0 / (acceptedEnd - acceptedStart);
-        double visibleRowsPerSecond = rows * 1_000_000_000.0 / (visibleEnd - acceptedStart);
         System.out.println(String.format(Locale.ROOT,
                 "JDBC_FILE_AGGREGATION_PASS transactions=%d rowsPerTransaction=%d rows=%d "
-                        + "acceptedMs=%d acceptedRowsPerSecond=%.2f visibleMs=%d "
-                        + "visibleRowsPerSecond=%.2f files=%d",
+                        + "acceptedMs=%d acceptedRowsPerSecond=%.2f commitToVisibleMs=%d files=%d",
                 transactions, rowsPerTransaction, rows, acceptedMillis, acceptedRowsPerSecond,
-                visibleMillis, visibleRowsPerSecond, filesAfter - filesBefore));
+                commitToVisibleMillis, filesAfter - filesBefore));
         return rows;
     }
 

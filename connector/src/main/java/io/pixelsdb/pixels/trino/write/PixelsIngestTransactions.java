@@ -57,7 +57,8 @@ public final class PixelsIngestTransactions implements Closeable {
     private static final long RENEWALS_PER_LEASE = 4L;
     private static final long DEFAULT_VISIBILITY_BARRIER_TIMEOUT_SECONDS = 30L;
     private static final long MAX_VISIBILITY_BARRIER_TIMEOUT_SECONDS =
-            TimeUnit.HOURS.toSeconds(1L);
+            TimeUnit.DAYS.toSeconds(1L);
+    private static final long VISIBILITY_BARRIER_RPC_GRACE_SECONDS = 30L;
     private static final MethodHandle FLUSH_VISIBLE_BARRIER = methodHandle(
             "flushVisibleBarrier", long.class);
 
@@ -165,7 +166,12 @@ public final class PixelsIngestTransactions implements Closeable {
                             + MAX_VISIBILITY_BARRIER_TIMEOUT_SECONDS);
         }
         try {
-            client.coordinator().flushVisibleBarrier(
+            client.coordinator(
+                            Math.addExact(
+                                    timeoutSeconds,
+                                    VISIBILITY_BARRIER_RPC_GRACE_SECONDS),
+                            TimeUnit.SECONDS)
+                    .flushVisibleBarrier(
                     VisibleBarrierRequest.newBuilder()
                             .setDeadlineMillis(Math.addExact(
                                     System.currentTimeMillis(),
