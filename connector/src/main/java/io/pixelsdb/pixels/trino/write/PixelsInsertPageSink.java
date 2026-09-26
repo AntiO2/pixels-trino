@@ -18,6 +18,7 @@
  */
 package io.pixelsdb.pixels.trino.write;
 
+import com.google.common.hash.Hashing;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.pixelsdb.pixels.common.ingest.*;
@@ -34,10 +35,13 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /** Worker-side bounded encoding and streaming. A sink seals streams; it never commits a transaction. */
 public final class PixelsInsertPageSink implements ConnectorPageSink {
-    private final PixelsMutationWriter writer;
+    private volatile PixelsMutationWriter writer;
+    private final Supplier<PixelsMutationWriter> writerFactory;
     private final PixelsPageEncoder encoder;
     private final TableSpec table;
     private final TableIndex primary;
@@ -57,23 +61,38 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
             MutationTransport transport,
             IngestOptions options)
             throws IOException {
+        this(handle, () -> writerId, types, transport, options);
+    }
+
+    public PixelsInsertPageSink(
+            PixelsInsertTableHandle handle,
+            LongSupplier writerId,
+            TypeManager types,
+            MutationTransport transport,
+            IngestOptions options)
+            throws IOException {
         table = handle.decodeTable();
         primary = IngestRows.primary(table);
         encoder = new PixelsPageEncoder(table, handle.getInputColumns(), types);
         maxRows = options.maxBatchRows;
         maxBytes = options.maxBatchBytes;
-        batchCounter = writerId;
-        writer =
-                new PixelsMutationWriter(
+        writerFactory = () -> {
+            long allocatedWriterId = writerId.getAsLong();
+            // Writer IDs are transaction-local. Include the transaction so single-row
+            // keyless transactions do not all begin on the same vnode.
+            batchCounter = Hashing.murmur3_128().newHasher()
+                    .putLong(handle.getTransactionId()).putLong(allocatedWriterId).hash().asLong();
+            return new PixelsMutationWriter(
                         handle.getTransactionId(),
                         handle.getStatementId(),
-                        writerId,
+                        allocatedWriterId,
                         table.getTableId(),
                         table.getSchemaVersion(),
                         ColumnBatchCodec.FORMAT,
                         Math.multiplyExact((long) maxBytes, 2),
                         options.maxStreams,
                         transport);
+        };
     }
 
     @Override
@@ -86,6 +105,12 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
         }
         if (tail.isCompletedExceptionally()) {
             return tail;
+        }
+        if (page.getPositionCount() == 0) {
+            return tail;
+        }
+        if (writer == null) {
+            writer = writerFactory.get();
         }
         // RLE/dictionary pages can have a small retained size but a huge expanded size.
         // Encode incrementally, one bounded row window at a time, and await each window.
@@ -168,7 +193,9 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
             throw new IllegalStateException("INSERT sink aborted");
         }
         finishing =
-                tail.thenCompose(ignored -> writer.finish())
+                tail.thenCompose(ignored -> writer == null
+                                ? CompletableFuture.<List<MutationStreamSeal>>completedFuture(Collections.emptyList())
+                                : writer.finish())
                         .thenApply(
                                 receipts -> {
                                     List<Slice> fragments = new ArrayList<>();
@@ -185,7 +212,9 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
     @Override
     public synchronized void abort() {
         aborted = true;
-        writer.abort();
+        if (writer != null) {
+            writer.abort();
+        }
     }
 
     @Override
@@ -195,6 +224,6 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
 
     @Override
     public long getMemoryUsage() {
-        return retainedBytes.get() + Math.multiplyExact((long) maxBytes, 2);
+        return retainedBytes.get() + (writer == null ? 0 : Math.multiplyExact((long) maxBytes, 2));
     }
 }

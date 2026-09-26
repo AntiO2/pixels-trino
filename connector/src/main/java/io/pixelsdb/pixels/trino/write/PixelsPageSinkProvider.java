@@ -59,6 +59,19 @@ public final class PixelsPageSinkProvider implements ConnectorPageSinkProvider {
             ConnectorPageSinkId id) {
         try {
             PixelsInsertTableHandle handle = (PixelsInsertTableHandle) input;
+            return new PixelsInsertPageSink(
+                    handle,
+                    () -> allocateWriter(handle, id),
+                    types,
+                    ingest.client().transport(handle.decodeTable()),
+                    ingest.options());
+        } catch (Exception e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Cannot create Retina INSERT sink", e);
+        }
+    }
+
+    private long allocateWriter(PixelsInsertTableHandle handle, ConnectorPageSinkId id) {
+        try {
             // Trino 466 derives PageSinkId from TaskId; parallel writer operators
             // in one task need separate ingestion streams and sequence spaces.
             AllocateWriterRequest request =
@@ -75,14 +88,9 @@ public final class PixelsPageSinkProvider implements ConnectorPageSinkProvider {
                     || !writer.getRequestId().equals(request.getRequestId())) {
                 throw new IOException("Invalid ingestion writer assignment");
             }
-            return new PixelsInsertPageSink(
-                    handle,
-                    writer.getWriterId(),
-                    types,
-                    ingest.client().transport(handle.decodeTable()),
-                    ingest.options());
+            return writer.getWriterId();
         } catch (Exception e) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Cannot create Retina INSERT sink", e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Cannot allocate Retina INSERT writer", e);
         }
     }
 }

@@ -514,6 +514,34 @@ start of planning through query end, so these phase statistics overlap and
 must not be added. Execution includes waiting, not just task CPU. The next profiling target is worker scheduling and
 per-RPC latency within execution, rather than assuming that WAL flush dominates.
 
+`PIXELS_SQL_FIXTURE_RPC_TIMING=true` enables optional server-handler timing in
+the real SQL backend fixture. `status.properties` records per-method calls,
+total nanoseconds and maximum nanoseconds. It excludes network transport and
+queueing before handler dispatch, and includes warmups and background RPCs.
+The disabled default does not collect timings. The baseline diagnostic run
+`/tmp/pixels-small-rpc-phases-20260926` showed 6600 AllocateWriter calls for
+1100 single-row transactions: Trino created six sinks per transaction but only
+one received rows.
+
+Writer allocation is lazy on the first nonempty Page. Empty or aborted-before-
+input sinks do not allocate backend identities, while each nonempty sink still
+receives its own durable writer ID. Keyless routing seeds its batch round-robin
+with both transaction and writer identity, so transaction-local writer IDs do
+not concentrate independent small transactions on the same vnode. Three
+`TestPixelsInsertPageSink` tests cover empty/aborted sinks, per-sink allocation
+and multi-vnode distribution; the existing 13 writer tests remain enabled.
+
+The final four-vnode run `/tmp/pixels-small-lazy-routing-20260926` completed
+1000 measured explicit transactions at 55.11 transactions/s, client P50
+269.528 ms, explicit COMMIT P50 29.340 ms and commit-to-visible latency
+2604.418 ms. Including 100 warmups, it recorded 1100 AllocateWriter calls and
+four output files. The instrumented eager-allocation baseline measured 51.86
+transactions/s and client P50 293.021 ms. This single comparison shows a modest
+gain, not a sustained capacity claim. The 16 writer/sink unit tests and
+40-check FILE+DURABLE SQL run in `/tmp/pixels-lazy-routing-sql-20260926` passed;
+both SQL processes exited normally. The remaining participant-handler waits
+still need lock-contention profiling before further synchronization changes.
+
 Run the second command after the configured buffer flush interval and again
 after stopping and restarting the normal Coordinator and Retina JVMs. It
 compares row counts and an order-independent checksum of every column. Before

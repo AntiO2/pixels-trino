@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: cd6bd608fd3011fff580748b821356ea2c3d72bb
+          ref: 61cb221dbff9feaed073f57dd1dd7126974f4398
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -98,7 +98,7 @@ jobs:
           bash pixels/tools/verify-ingest-contract.sh
           bash pixels-trino/tools/verify-ingest-contract.sh "$PWD/pixels"
           mvn -B -ntp -f pixels-trino/pom.xml -DskipTests=false \
-            -Dtest=TestPixelsMutationWriter -Dsurefire.failIfNoSpecifiedTests=false test \
+            -Dtest=TestPixelsMutationWriter,TestPixelsInsertPageSink -Dsurefire.failIfNoSpecifiedTests=false test \
             2>&1 | tee verification/trino-build.log
       - name: Execute the representation and acknowledgement SQL matrix
         shell: bash
