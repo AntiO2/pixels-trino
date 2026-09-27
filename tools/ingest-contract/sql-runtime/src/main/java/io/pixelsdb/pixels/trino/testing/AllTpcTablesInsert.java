@@ -348,13 +348,13 @@ public final class AllTpcTablesInsert {
                             + ", targetRows=" + targetRows + ", sourceChecksum=" + sourceChecksum
                             + ", targetChecksum=" + targetChecksum);
         }
-        System.out.printf(
+        System.out.println(String.format(
                 Locale.ROOT,
                 "TPC_TABLE_%s_PASS source=%s rows=%d columns=%d sourceScanMs=%d "
                         + "acceptedRows=%d acceptedMs=%d acceptedRowsPerSecond=%.2f "
                         + "visibleAfterAcceptedMs=%d "
                         + "transactions=%d largestTransactionRows=%d "
-                        + "checksum=%s%n",
+                        + "checksum=%s",
                 verifyOnly || completedBeforeRun ? "RECOVERY" : "INSERT",
                 source,
                 sourceRows,
@@ -369,7 +369,7 @@ public final class AllTpcTablesInsert {
                 TimeUnit.NANOSECONDS.toMillis(inserted.visibleNanos()),
                 inserted.transactions(),
                 inserted.largestTransactionRows(),
-                sourceChecksum);
+                sourceChecksum));
         return sourceRows;
     }
 
@@ -436,13 +436,13 @@ public final class AllTpcTablesInsert {
                 }
             }
         }
-        System.out.printf(
+        System.out.println(String.format(
                 Locale.ROOT,
-                "ALL_TPC_TABLES_%s_PASS tables=%d rows=%d targetSchema=%s dataRoot=%s%n",
+                "ALL_TPC_TABLES_%s_PASS tables=%d rows=%d targetSchema=%s dataRoot=%s",
                 verifyOnly ? "RECOVERY" : "INSERT",
                 tables,
                 rows,
                 targetSchema,
-                dataRoot);
+                dataRoot));
     }
 }

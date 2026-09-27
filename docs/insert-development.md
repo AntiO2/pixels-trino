@@ -292,6 +292,38 @@ cases; it is part of the Full SQL CI lifecycle regression set.
 
 ### TPC-H and TPC-DS INSERT coverage
 
+#### Full-column SF10 benchmark
+
+Build Pixels with JDK 8 and the connector with JDK 23 as described above, then
+run with JDK 23 and the matching native runtime:
+
+~~~sh
+PIXELS_HOME=/path/to/pixels-home SQL_E2E_SKIP_BUILD=1 \
+  bash tools/benchmark-all-tpc-tables.sh /path/to/pixels
+~~~
+
+This entry point defaults to `tpch.sf10` and `tpcds.sf10`, all 32 tables and
+all columns, two Trino workers, four vnodes, and FILE + DURABLE. It creates a
+fresh isolated environment and never resumes a previous import. Each table
+uses one INSERT followed by a visibility barrier. Accepted time measures the
+INSERT through its durable commit acknowledgement; commit-to-visible latency
+measures the subsequent barrier wait. Source generation during INSERT is
+included, while separate source scans and result verification are excluded.
+Every table is checked using row count and an order-independent full-column
+checksum.
+
+The defaults reserve 6 GiB heap each for engine and backend, allow up to
+70 million rows per transaction, bound WAL payload to 64 GiB, and allow four
+hours for the run. Batch payload is capped at 1 MiB to leave room for the RPC
+envelope. The script exposes these settings as environment overrides.
+
+The JDBC client, Trino servers, connector, TCP/gRPC, WAL, installation, indexes,
+visibility and Pixels file I/O are real. Metadata, node discovery and external
+ID allocation use the SQL fixture. Its dynamic benchmark table definitions
+are process-scoped; use the normal-server entry point for restart verification.
+CI explicitly selects `TPCH_SCHEMA=tiny TPCDS_SCHEMA=tiny` for all-column
+correctness coverage; those results are not SF10 performance measurements.
+
 Run the representative two-worker latency benchmark in an isolated environment:
 
 ~~~sh

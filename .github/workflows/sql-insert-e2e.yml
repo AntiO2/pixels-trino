@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: ee8c0cf3ffe823a1352b5dff004dc6cb82a6a938
+          ref: 4218785abbe38d27494b5696e41c1580b89b1020
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -175,6 +175,17 @@ jobs:
               bash pixels-trino/tools/verify-sql-insert.sh "$PWD/pixels" -ntp \
               2>&1 | tee "verification/small-${mode,,}.log"
           done
+      - name: Verify full-column INSERT for every TPC-H and TPC-DS table
+        shell: bash
+        run: |
+          set -euo pipefail
+          SQL_E2E_WORK_DIR="$PWD/verification/all-tpc-tables" \
+            TPCH_SCHEMA=tiny TPCDS_SCHEMA=tiny \
+            PIXELS_SQL_FIXTURE_MAX_PREPARED_ROWS=3000000 \
+            PIXELS_SQL_FIXTURE_MAX_STATE_BYTES=268435456 \
+            SQL_E2E_BACKEND_HEAP=2g SQL_E2E_ENGINE_HEAP=3g \
+            bash pixels-trino/tools/benchmark-all-tpc-tables.sh "$PWD/pixels" -ntp \
+            2>&1 | tee verification/all-tpc-tables.log
       - name: Record SQL verification summary
         if: always()
         shell: bash
@@ -208,6 +219,10 @@ jobs:
                 grep 'SMALL_TRANSACTION_INSERT_PASS ' "$log" || true
               fi
             done
+            if test -f verification/all-tpc-tables/sql.log; then
+              grep -E '(TPC_TABLE_INSERT_PASS |ALL_TPC_TABLES_INSERT_PASS )' \
+                verification/all-tpc-tables/sql.log || true
+            fi
             echo '```'
             echo
             echo 'Catalog, node directory, and external ID allocation are fixtures. SQL execution, connector, TCP/gRPC, journals, Retina buffers, MainIndex, visibility, and file reads/writes are real.'

@@ -72,6 +72,7 @@ backend = [pixels / 'pixels-daemon/target/test-classes', pixels / 'pixels-daemon
 (work / 'backend.cp').write_text(os.pathsep.join(map(str, backend)) + os.pathsep + (work / 'backend-dependencies.cp').read_text().strip())
 PY
 javac -cp "$(cat "$WORK/engine.cp")" -d "$WORK/driver-classes" \
+    -sourcepath "$TRINO/tools/ingest-contract/sql-runtime/src/main/java" \
     "$SQL_E2E_MAIN_SOURCE"
 
 export LD_LIBRARY_PATH="$PIXELS_HOME/lib:${LD_LIBRARY_PATH:-}"
