@@ -70,9 +70,10 @@ public class TestPixelsInsertPageSink
         first.appendPage(new Page(1)).join();
         second.appendPage(new Page(1)).join();
         assertEquals(2, allocations.get());
-        assertEquals(List.of(1L, 1L, 2L), streams);
+        assertTrue(streams.isEmpty(), "Partial batches remain bounded in the sink until finish");
         assertEquals(1, first.finish().join().size());
         assertEquals(1, second.finish().join().size());
+        assertEquals(List.of(1L, 2L), streams);
         assertSame(first.finish(), first.finish());
     }
 
@@ -99,6 +100,99 @@ public class TestPixelsInsertPageSink
     private static PixelsInsertPageSink sink(long transaction, int routes, AtomicLong allocations,
             List<Long> streams, List<Integer> shards) throws Exception
     {
+        return sink(transaction, routes, allocations, streams, shards, new ArrayList<>(),
+                CompletableFuture.completedFuture(null), new AtomicLong());
+    }
+
+    @Test
+    public void combinesPagesWithBackpressureAndSealsOnlyAfterTail() throws Exception
+    {
+        List<MutationBatch> batches = new ArrayList<>();
+        CompletableFuture<Void> blocked = new CompletableFuture<>();
+        AtomicLong seals = new AtomicLong();
+        PixelsInsertPageSink sink = sink(1, 1, new AtomicLong(), new ArrayList<>(), new ArrayList<>(),
+                batches, blocked, seals);
+        int limit = new IngestOptions().maxBatchRows;
+        sink.appendPage(new Page(limit - 1)).join();
+        assertTrue(batches.isEmpty());
+        CompletableFuture<?> append = sink.appendPage(new Page(2));
+        assertFalse(append.isDone());
+        assertEquals(limit, batches.getFirst().getRowCount());
+        assertThrows(IllegalStateException.class, () -> sink.appendPage(new Page(1)));
+        CompletableFuture<?> finish = sink.finish();
+        assertFalse(finish.isDone());
+        assertEquals(0, seals.get());
+        blocked.complete(null);
+        finish.join();
+        assertEquals(List.of(limit, 1), batches.stream().map(MutationBatch::getRowCount).toList());
+        assertEquals(1, seals.get());
+        assertEquals(0L, batches.getFirst().getSequence());
+        assertEquals(1L, batches.getLast().getSequence());
+        for (MutationBatch batch : batches) {
+            var rows = io.pixelsdb.pixels.common.ingest.wire.ColumnBatchCodec.decode(
+                    batch.getPayload(), batch.getRowCount(), 1, limit, new IngestOptions().maxBatchBytes);
+            assertTrue(rows.stream().allMatch(row -> row[0] == null));
+        }
+    }
+
+    @Test
+    public void failedAppendCannotSealBufferedTail() throws Exception
+    {
+        CompletableFuture<Void> blocked = new CompletableFuture<>();
+        AtomicLong seals = new AtomicLong();
+        List<MutationBatch> batches = new ArrayList<>();
+        PixelsInsertPageSink sink = sink(1, 1, new AtomicLong(), new ArrayList<>(), new ArrayList<>(),
+                batches, blocked, seals);
+        sink.appendPage(new Page(new IngestOptions().maxBatchRows + 1));
+        CompletableFuture<?> finish = sink.finish();
+        blocked.completeExceptionally(new java.io.IOException("Injected append failure"));
+        assertThrows(java.util.concurrent.CompletionException.class, finish::join);
+        assertEquals(1, batches.size());
+        assertEquals(0, seals.get());
+    }
+
+    @Test
+    public void byteLimitFlushesBeforeRowLimitAcrossPages() throws Exception
+    {
+        String key = "retina.ingest.max.batch.bytes";
+        var config = io.pixelsdb.pixels.common.utils.ConfigFactory.Instance();
+        int original = new IngestOptions().maxBatchBytes;
+        int rowsPerBatch = 3;
+        int batchBytes = (3 + rowsPerBatch) * Integer.BYTES;
+        try {
+            config.addProperty(key, Integer.toString(batchBytes));
+            List<MutationBatch> batches = new ArrayList<>();
+            PixelsInsertPageSink sink = sink(1, 1, new AtomicLong(), new ArrayList<>(), new ArrayList<>(),
+                    batches, CompletableFuture.completedFuture(null), new AtomicLong());
+            sink.appendPage(new Page(rowsPerBatch - 1)).join();
+            assertTrue(batches.isEmpty());
+            sink.appendPage(new Page(rowsPerBatch)).join();
+            sink.finish().join();
+            assertEquals(List.of(rowsPerBatch, rowsPerBatch - 1),
+                    batches.stream().map(MutationBatch::getRowCount).toList());
+            assertTrue(batches.stream().allMatch(batch -> batch.getPayloadBytes() <= batchBytes));
+        } finally {
+            config.addProperty(key, Integer.toString(original));
+        }
+    }
+
+    @Test
+    public void abortDiscardsUnsentRowsAndReleasesTheirMemory() throws Exception
+    {
+        List<Long> streams = new ArrayList<>();
+        PixelsInsertPageSink sink = sink(new AtomicLong(), streams);
+        sink.appendPage(new Page(1)).join();
+        long bufferedMemory = sink.getMemoryUsage();
+        sink.abort();
+        assertTrue(streams.isEmpty());
+        assertTrue(sink.getMemoryUsage() < bufferedMemory);
+        assertThrows(IllegalStateException.class, sink::finish);
+    }
+
+    private static PixelsInsertPageSink sink(long transaction, int routes, AtomicLong allocations,
+            List<Long> streams, List<Integer> shards, List<MutationBatch> batches,
+            CompletableFuture<Void> appendCompletion, AtomicLong seals) throws Exception
+    {
         TableSpec.Builder table = TableSpec.newBuilder().setTableId(1).setSchemaVersion(1)
                 .addColumns(TableColumn.newBuilder().setId(1).setName("id").setType("bigint"));
         for (int shard = 0; shard < routes; shard++) {
@@ -117,13 +211,15 @@ public class TestPixelsInsertPageSink
         MutationTransport transport = new MutationTransport() {
             @Override
             public CompletableFuture<Void> append(MutationBatch batch) {
+                batches.add(batch);
                 streams.add(batch.getStreamId().getWriterId());
                 shards.add(batch.getStreamId().getShardId());
-                return CompletableFuture.completedFuture(null);
+                return appendCompletion;
             }
 
             @Override
             public CompletableFuture<MutationStreamSeal> seal(MutationStreamSeal expected) {
+                seals.incrementAndGet();
                 return CompletableFuture.completedFuture(expected);
             }
         };

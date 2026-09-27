@@ -38,8 +38,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import static io.airlift.slice.SizeOf.sizeOf;
+
 /** Worker-side bounded encoding and streaming. A sink seals streams; it never commits a transaction. */
 public final class PixelsInsertPageSink implements ConnectorPageSink {
+    private static final int BATCH_HEADER_BYTES = 3 * Integer.BYTES;
     private volatile PixelsMutationWriter writer;
     private final Supplier<PixelsMutationWriter> writerFactory;
     private final PixelsPageEncoder encoder;
@@ -49,6 +52,10 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
     private final int maxBytes;
     private final AtomicLong completedBytes = new AtomicLong();
     private final AtomicLong retainedBytes = new AtomicLong();
+    private final AtomicLong pendingMemoryBytes = new AtomicLong();
+    private byte[][][] pendingRows;
+    private int pendingCount;
+    private int pendingBytes = BATCH_HEADER_BYTES;
     private long batchCounter;
     private CompletableFuture<Void> tail = CompletableFuture.completedFuture(null);
     private CompletableFuture<Collection<Slice>> finishing;
@@ -115,7 +122,10 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
         // RLE/dictionary pages can have a small retained size but a huge expanded size.
         // Encode incrementally, one bounded row window at a time, and await each window.
         retainedBytes.set(page.getRetainedSizeInBytes());
-        tail = appendWindow(page, 0).whenComplete((ignored, error) -> retainedBytes.set(0));
+        tail = appendWindow(page, 0).whenComplete((ignored, error) -> {
+            retainedBytes.set(0);
+            if (error != null) releasePendingRows();
+        });
         return tail;
     }
 
@@ -127,31 +137,27 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
             if (aborted) {
                 throw new CancellationException("INSERT sink aborted");
             }
+            if (primary == null) {
+                return appendKeylessWindow(page, start);
+            }
             Map<Integer, List<byte[][]>> groups = new LinkedHashMap<>();
-            int remainingBytes = maxBytes - 12;
+            int remainingBytes = maxBytes - BATCH_HEADER_BYTES;
             int end = start;
-            int noKeyShard =
-                    table.getRoutes(Math.floorMod(batchCounter++, table.getRoutesCount()))
-                            .getShardId();
             while (end < page.getPositionCount() && end - start < maxRows) {
                 byte[][] row = encoder.encodeRow(page, end);
-                long rowBytes = 4L * row.length;
+                long rowBytes = (long) Integer.BYTES * row.length;
                 for (byte[] value : row) {
                     if (value != null) {
                         rowBytes += value.length;
                     }
                 }
-                if (rowBytes > maxBytes - 12L) {
+                if (rowBytes > maxBytes - BATCH_HEADER_BYTES) {
                     throw new IOException("One INSERT row exceeds the configured batch limit");
                 }
                 if (rowBytes > remainingBytes && end > start) {
                     break;
                 }
-                int shard =
-                        primary == null
-                                ? noKeyShard
-                                : RetinaUtils.getBucketIdFromByteBuffer(
-                                        IngestRows.indexKey(primary, row));
+                int shard = RetinaUtils.getBucketIdFromByteBuffer(IngestRows.indexKey(primary, row));
                 IngestWire.route(table, shard);
                 groups.computeIfAbsent(shard, ignored -> new ArrayList<>()).add(row);
                 remainingBytes -= (int) rowBytes;
@@ -184,6 +190,64 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
         }
     }
 
+    private CompletableFuture<Void> appendKeylessWindow(Page page, int start) throws IOException {
+        if (pendingRows == null) {
+            pendingRows = new byte[maxRows][][];
+            pendingMemoryBytes.set(sizeOf(pendingRows));
+        }
+        int end = start;
+        while (end < page.getPositionCount() && pendingCount < maxRows) {
+            byte[][] row = encoder.encodeRow(page, end);
+            long rowBytes = (long) Integer.BYTES * row.length;
+            long rowMemory = sizeOf(row);
+            for (byte[] value : row) {
+                if (value != null) {
+                    rowBytes += value.length;
+                    rowMemory += sizeOf(value);
+                }
+            }
+            if (rowBytes > maxBytes - BATCH_HEADER_BYTES) {
+                throw new IOException("One INSERT row exceeds the configured batch limit");
+            }
+            if (rowBytes > maxBytes - pendingBytes) break;
+            pendingRows[pendingCount++] = row;
+            pendingBytes += (int) rowBytes;
+            pendingMemoryBytes.addAndGet(rowMemory);
+            end++;
+        }
+        if (pendingCount == maxRows || pendingBytes == maxBytes || end < page.getPositionCount()) {
+            int next = end;
+            return flushPendingRows().thenComposeAsync(ignored -> appendWindow(page, next));
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    private CompletableFuture<Void> flushPendingRows() {
+        if (aborted) return CompletableFuture.failedFuture(new CancellationException("INSERT sink aborted"));
+        if (pendingCount == 0) return CompletableFuture.completedFuture(null);
+        try {
+            byte[] payload = ColumnBatchCodec.encode(
+                    Arrays.asList(pendingRows).subList(0, pendingCount), table.getColumnsCount(), maxBytes);
+            int count = pendingCount;
+            int shard = table.getRoutes(Math.floorMod(batchCounter++, table.getRoutesCount())).getShardId();
+            Arrays.fill(pendingRows, 0, pendingCount, null);
+            pendingCount = 0;
+            pendingBytes = BATCH_HEADER_BYTES;
+            pendingMemoryBytes.set(sizeOf(pendingRows));
+            return writer.append(MutationStreamId.Kind.APPEND_ROWS, shard, count, payload)
+                    .thenRun(() -> completedBytes.addAndGet(payload.length));
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    private void releasePendingRows() {
+        pendingRows = null;
+        pendingCount = 0;
+        pendingBytes = BATCH_HEADER_BYTES;
+        pendingMemoryBytes.set(0);
+    }
+
     @Override
     public synchronized CompletableFuture<Collection<Slice>> finish() {
         if (finishing != null) {
@@ -193,10 +257,11 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
             throw new IllegalStateException("INSERT sink aborted");
         }
         finishing =
-                tail.thenCompose(ignored -> writer == null
+                tail.thenCompose(ignored -> flushPendingRows())
+                        .thenCompose(ignored -> writer == null
                                 ? CompletableFuture.<List<MutationStreamSeal>>completedFuture(Collections.emptyList())
                                 : writer.finish())
-                        .thenApply(
+                        .<Collection<Slice>>thenApply(
                                 receipts -> {
                                     List<Slice> fragments = new ArrayList<>();
                                     for (MutationStreamSeal receipt : receipts) {
@@ -205,7 +270,7 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
                                                         IngestWire.encode(receipt).toByteArray()));
                                     }
                                     return fragments;
-                                });
+                                }).whenComplete((ignored, error) -> releasePendingRows());
         return finishing;
     }
 
@@ -215,6 +280,7 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
         if (writer != null) {
             writer.abort();
         }
+        tail.whenComplete((ignored, error) -> releasePendingRows());
     }
 
     @Override
@@ -224,6 +290,7 @@ public final class PixelsInsertPageSink implements ConnectorPageSink {
 
     @Override
     public long getMemoryUsage() {
-        return retainedBytes.get() + (writer == null ? 0 : Math.multiplyExact((long) maxBytes, 2));
+        return retainedBytes.get() + pendingMemoryBytes.get()
+                + (writer == null ? 0 : Math.multiplyExact((long) maxBytes, 2));
     }
 }
