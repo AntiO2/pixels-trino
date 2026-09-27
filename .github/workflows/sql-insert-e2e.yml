@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AntiO2/pixels
-          ref: 61cb221dbff9feaed073f57dd1dd7126974f4398
+          ref: 912237f84269f3f8a09565c5863d9f28b682bed5
           path: pixels
           persist-credentials: false
       - name: Record exact source versions
@@ -60,7 +60,7 @@ jobs:
           mvn -B -ntp -f pixels/pom.xml \
             -pl pixels-daemon,pixels-cache,pixels-storage/pixels-storage-redis,pixels-turbo/pixels-invoker-spike,pixels-turbo/pixels-invoker-vhive,pixels-turbo/pixels-invoker-lambda,pixels-turbo/pixels-scaling-ec2 \
             -am -DskipTests=false \
-            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestExplicitIngestTransaction,TestRetinaPrivateRead,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestCoordinatorStateStore,TestCoordinatorDurabilityBoundaries,TestLocalMutationJournal,TestServerContainer,TestStorageGcWal,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart \
+            -Dtest=TestIngestClient,TestIngestWriterAllocation,TestExplicitIngestTransaction,TestRetinaPrivateRead,TestRetinaServer,TestRecoveryCheckpoint,TestRetinaIngestParticipantCheckpoint,TestDurableIngestCoordinatorGc,TestCoordinatorStateStore,TestCoordinatorDurabilityBoundaries,TestLocalMutationJournal,TestServerContainer,TestStorageGcWal,TestMutationBatch,TestColumnBatchCodec,TestIngestRows,TestIngestColumnBatch,TestMainIndexBufferRanges,TestSqliteMainIndex#testRelocateEntriesPreservesRowIdsAndSurvivesRestart+testDirectRangeSurvivesFlushAndReopen+testBulkOverlapPreservesPerEntryResultsAndOriginalLocations+testBulkRangesSurviveFailedFlushAndRetry \
             -Dsurefire.failIfNoSpecifiedTests=false -Dmaven.source.skip=true install \
             2>&1 | tee verification/pixels-build.log
           bash pixels/tools/verify-ingest-gc.sh \

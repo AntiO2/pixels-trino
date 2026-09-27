@@ -360,7 +360,8 @@ already built under JDK 8 (Pixels) and JDK 23 (Trino), run under JDK 23:
 
 ~~~sh
 export PIXELS_HOME=/path/to/matching/runtime
-SQL_E2E_SKIP_BUILD=1 SQL_E2E_WORK_DIR=/tmp/insert-sf10-fresh \
+BENCHMARK_ROOT=$(mktemp -d)
+SQL_E2E_SKIP_BUILD=1 SQL_E2E_WORK_DIR="$BENCHMARK_ROOT/sql" \
 SQL_E2E_TIMEOUT_SECONDS=14400 \
 SQL_E2E_ENGINE_HEAP=8g SQL_E2E_BACKEND_HEAP=6g \
 SQL_E2E_BACKEND_STOP_TIMEOUT_SECONDS=180 \
@@ -383,9 +384,9 @@ bash tools/benchmark-tpch-tpcds-insert.sh /path/to/pixels
 
 # Build pixels-cli with JDK 8 first; execute this harness with JDK 23.
 bash tools/benchmark-native-load.sh /path/to/pixels \
-  /tmp/insert-sf10-fresh tpch /tmp/native-tpch-fresh
+  "$BENCHMARK_ROOT/sql" tpch "$BENCHMARK_ROOT/native-tpch"
 bash tools/benchmark-native-load.sh /path/to/pixels \
-  /tmp/insert-sf10-fresh tpcds /tmp/native-tpcds-fresh
+  "$BENCHMARK_ROOT/sql" tpcds "$BENCHMARK_ROOT/native-tpcds"
 ~~~
 
 The native comparison exports the verified projection before its timer, then
@@ -394,49 +395,49 @@ PixelsWriter output. Metadata uses the catalog fixture. CSV preparation is
 excluded, input is warm, and output footer row counts are checked. This baseline
 does not perform transactional WAL or MainIndex installation.
 
-September 26, 2026, Pixels `b66e3151d6d6a7e072a31155e04b42f84bc03479`,
-two Trino workers, one Retina owner, four vnodes, staged input:
+September 27, 2026, two Trino workers, one Retina owner, four vnodes,
+eight concurrent INSERTs, staged input:
+
+Implementation: Pixels `912237f84269f3f8a09565c5863d9f28b682bed5` and
+Pixels-Trino `2f6cea4402bd043592fcf935f104e8adf57a935e`.
 
 | Projection | Rows | DURABLE accepted | Accepted rows/s | Commit-to-visible | Start-to-visible | CLI writer |
 |---|---:|---:|---:|---:|---:|---:|
-| TPC-H SF10 lineitem | 59,986,052 | 27.910 s | 2,149,214 | 49.768 s | 77.678 s | 26.156 s |
-| TPC-DS SF10 store_sales | 28,800,991 | 8.412 s | 3,423,594 | 14.932 s | 23.344 s | 6.798 s |
+| TPC-H SF10 lineitem | 59,986,052 | 21.108 s | 2,841,837 | 23.263 s | 44.371 s | 26.156 s |
+| TPC-DS SF10 store_sales | 28,800,991 | 6.268 s | 4,594,887 | 5.551 s | 11.819 s | 6.798 s |
 
 Accepted time ends after all INSERTs return with durable COMMIT decisions.
 Commit-to-visible starts there and ends when the fixed-boundary barrier returns.
-It is a latency, not a throughput. Source staging took 4.798 s and 15.276 s;
-verification took 49.647 s and 40.237 s respectively. Both count and
-order-independent all-projected-column checksums matched. This comparison still
-shows a 2.97x / 3.43x start-to-visible gap against the CLI writer.
+It is a latency, not a throughput. Source staging took 6.328 s and 15.466 s;
+verification took 55.349 s and 44.574 s respectively. Both count and
+order-independent all-projected-column checksums matched. The run produced
+32 Pixels files with 1,428 Append RPCs, retired all transactions, reclaimed
+the payload WAL to 12 KiB, and shut down the backend normally. The CLI writer
+times are the separately measured native baseline. Start-to-visible time is
+1.70x / 1.74x that baseline; repeated-run distributions and independent
+background materialization-rate measurements remain follow-up work.
+
+Keyless PageSinks combine successive Trino Pages up to the configured batch
+row or byte limit, account for retained rows, and apply backpressure while
+sending a full batch. Finish sends the remaining rows before sealing streams.
+Indexed routing retains its per-Page batching path.
 
 The optimized path uses a bounded private batch cache after durable sealing,
 batch MainIndex installation for fresh allocations, cached batch type parsing,
-and grouped WAL reclamation. Recovery retains exact-location verification;
-cache misses and restarts read the WAL. Further profiling should target batch
-allocation/encoding and MainIndex-buffer installation before increasing queue
-limits or reporting accepted throughput as completed materialization.
-
-Validation for this revision:
-
-- `verify-sql-insert.sh` passed all four `BUFFERED|FILE` × `VISIBLE|DURABLE`
-  configurations, each with 40 checks and explicit/autocommit statements.
-- Pixels `verify-ingest-gc.sh` passed 19 journal cases and 13 GC cases,
-  including five crash boundaries.
-- Pixels `verify-ingest-daemon.sh` passed checkpoint/restart, shared-file
-  recovery, offline cutover and corrupt/missing-state rejection using normal
-  TransServer and RetinaServer services.
-- JDK 8 Maven tests `TestLocalMutationJournal,TestRetinaPrivateRead,`
-  `TestRetinaIngestParticipantCheckpoint,TestPixelsIngestStorage,`
-  `TestCoordinatorStateStore,TestCoordinatorDurabilityBoundaries` passed
-  (27 tests) with `-DskipTests=false -Dsurefire.failIfNoSpecifiedTests=false`
-  and `-pl pixels-daemon -am`.
-
-The SF10 evidence directory is `/tmp/pixels-staged-sf10-20260926`, containing
-`sql.log`, `backend.log`, `status.properties` and `exit-code=0`. The native
-results are in `/tmp/pixels-native-tpch-sf10-final-20260926/load.log` and
-`/tmp/pixels-native-tpcds-sf10-20260926/load.log`. SQL and daemon evidence use
-the `/tmp/pixels-group-gc-*-20260926` directories. These are local evidence
-paths; the commands above reproduce the benchmark in a fresh directory.
+and grouped WAL reclamation. SQLite MainIndex retains continuous bulk mappings
+as `RowIdRange` objects in its existing write buffer; overlapping batches retain
+per-entry duplicate results, and buffered mappings are discarded only after a
+successful durable flush. Fresh FILE spans pass continuous mappings directly
+through LocalIndexService to MainIndex without constructing per-row messages.
+Prepare validates each input batch in one pass; publication polling does not
+reread installed payloads, and checkpoint retains coverage descriptors rather
+than the transaction's full payload. Immutable payload bytes are shared with RPC and
+WAL encoding rather than converted through intermediate mutable arrays.
+For FILE tables without business indexes, validated columnar payloads feed
+bounded PixelsWriter vector windows directly; variable-width vectors reference
+payload slices until the writer consumes the window. This path does not use
+the public MemTable. Recovery retains exact-location verification; cache misses
+and restarts read the WAL. Accepted throughput is not completed materialization.
 
 ### Small transaction benchmark
 
@@ -453,97 +454,50 @@ bash tools/benchmark-small-inserts.sh \
 ~~~
 
 Set `SMALL_INSERT_TRANSACTION_MODE=EXPLICIT` to execute each INSERT followed by
-JDBC `commit()` on the same connection. On the September 19, 2026 local
-two-worker FILE+DURABLE run, 1000 measured single-row transactions plus 100
-warmups formed one Pixels file:
+JDBC `commit()` on the same connection. Configure the target deployment for
+FILE representation and DURABLE acknowledgement when measuring asynchronous
+ingestion. Use a fresh target table for each run.
 
-| Mode | Accepted | Accepted throughput | Commit P50 | Commit-to-visible latency |
-|---|---:|---:|---:|---:|
-| AUTOCOMMIT | 19.950 s | 50.13 rows/s | 285.772 ms | 2,855.058 ms |
-| EXPLICIT | 20.127 s | 49.69 rows/s | 297.985 ms | 2,621.465 ms |
+To run against the isolated SQL fixture, use the matching JDK 23 runtime and
+prebuilt Pixels/Trino artifacts:
 
-September 26 rerun on Pixels `b66e3151` and connector `3dee5d2`, using fresh
-FILE+DURABLE fixtures, four vnodes, two Trino workers, concurrency 16,
-100 warmups and 1000 measured single-row transactions:
+~~~sh
+SQL_E2E_SKIP_BUILD=1 SQL_E2E_WORK_DIR="$(mktemp -d)" \
+SQL_E2E_MAIN_CLASS=io.pixelsdb.pixels.trino.testing.SmallTransactionsInsert \
+SQL_E2E_PASS_PATTERN=SMALL_TRANSACTION_INSERT_PASS \
+SQL_E2E_TIMEOUT_SECONDS=1800 SQL_E2E_BACKEND_HEAP=2g \
+SMALL_INSERT_CREATE_TABLE=false SMALL_INSERT_TRANSACTIONS=1000 \
+SMALL_INSERT_CONCURRENCY=16 SMALL_INSERT_TRANSACTION_MODE=EXPLICIT \
+PIXELS_SQL_FIXTURE_REPRESENTATION=FILE PIXELS_SQL_FIXTURE_COMMIT_ACK=DURABLE \
+PIXELS_SQL_FIXTURE_ROUTE_COUNT=4 PIXELS_SQL_FIXTURE_FILE_MAX_DELAY_MS=300000 \
+bash tools/verify-sql-insert.sh /path/to/pixels
+~~~
 
-| Mode | Accepted | Transactions/s | Commit P50 | Commit P99 | Commit-to-visible |
-|---|---:|---:|---:|---:|---:|
-| AUTOCOMMIT | 19.820 s | 50.45 | 305.838 ms | 597.800 ms | 2,601.967 ms |
-| EXPLICIT | 18.840 s | 53.08 | 287.614 ms | 583.512 ms | 2,551.180 ms |
+The harness validates final row count and ID sum. It reports accepted
+throughput, client latency percentiles, INSERT query elapsed time, explicit
+COMMIT latency and commit-to-visible latency separately. Percentiles are not
+additive; query CPU time does not include coordinator planning time.
 
-Run with `SQL_E2E_MAIN_CLASS=io.pixelsdb.pixels.trino.testing.SmallTransactionsInsert`,
-`SQL_E2E_PASS_PATTERN=SMALL_TRANSACTION_INSERT_PASS`,
-`SMALL_INSERT_CREATE_TABLE=false`, `SMALL_INSERT_TRANSACTIONS=1000`,
-`SMALL_INSERT_CONCURRENCY=16` and the selected
-`SMALL_INSERT_TRANSACTION_MODE=AUTOCOMMIT|EXPLICIT` through
-`tools/verify-sql-insert.sh`. Set `PIXELS_SQL_FIXTURE_REPRESENTATION=FILE`,
-`PIXELS_SQL_FIXTURE_COMMIT_ACK=DURABLE`, `PIXELS_SQL_FIXTURE_ROUTE_COUNT=4`,
-`PIXELS_SQL_FIXTURE_FILE_MAX_DELAY_MS=300000`, `SQL_E2E_BACKEND_HEAP=2g`
-and `SQL_E2E_TIMEOUT_SECONDS=1800`. Use a fresh `SQL_E2E_WORK_DIR` per run.
-The JDBC harness validates final count and ID sum; both modes produced four
-files. Evidence is in `/tmp/pixels-small-autocommit-20260926` and
-`/tmp/pixels-small-explicit-20260926`.
+Optional diagnostics:
 
-Small-transaction throughput has not materially improved with the bulk-path
-optimizations. Profile query planning/scheduling and transaction RPC stages
-separately before attributing its fixed cost to fsync. For pipeline design,
-[RocksDB pipelined writes](https://github.com/facebook/rocksdb/wiki/Pipelined-Write)
-illustrate overlapping the next WAL group with installation of the previous
-group. In FILE mode the installation stage remains direct file materialization:
-`TestPixelsIngestStorage` asserts unchanged shared MemTable row counts and no
-new object-staging blocks across two FILE transaction contributions.
+- `SMALL_INSERT_QUERY_DIAGNOSTICS=true` captures engine query phases in the
+  embedded JDBC harness. Trino 466 measures execution from planning start
+  through query end, so phase timings overlap.
+- `PIXELS_SQL_FIXTURE_RPC_TIMING=true` records per-method call counts, total
+  nanoseconds and maximum nanoseconds in `status.properties`. These are
+  server-handler timings: network transport and pre-dispatch queueing are
+  excluded, while warmups and background RPCs are included.
 
-The diagnostic rerun in `/tmp/pixels-small-stages-20260926` additionally records
-JDBC-reported query queued/CPU time and the explicit `Connection.commit()` call
-separately. For 1000 explicit single-row transactions it measured 50.58
-transactions/s, client P50 299.593 ms, INSERT query elapsed P50 258 ms,
-queued P50 0 ms, query CPU P50 2 ms and explicit commit P50 33.758 ms.
-These separate percentiles are not additive; query CPU is not coordinator
-planning time. The run used the FILE writer's reusable per-file column batch,
-which also passed the real-storage test and 40-check FILE+DURABLE SQL regression
-(`/tmp/pixels-vector-file-sql-20260926`). No small-transaction throughput gain
-is established by this change.
+Both diagnostics are disabled by default. Keep their settings consistent
+between comparison runs. Preserve the source revisions, configuration and
+result logs with benchmark reports; generated datasets can be removed after
+verification and any native-writer comparisons are complete.
 
-Set `SMALL_INSERT_QUERY_DIAGNOSTICS=true` for the embedded JDBC harness to
-capture engine query phases after each measured INSERT. It remains disabled
-for normal benchmark runs and external JDBC deployments. The diagnostic run
-`/tmp/pixels-small-query-phases-20260926` collected 1000 samples: planning P50
-40.549 ms, starting P50 0.791 ms, execution P50 218.546 ms and finishing P50
-0.128 ms. Analysis P50 was 35.367 ms. Trino 466 measures execution from the
-start of planning through query end, so these phase statistics overlap and
-must not be added. Execution includes waiting, not just task CPU. The next profiling target is worker scheduling and
-per-RPC latency within execution, rather than assuming that WAL flush dominates.
+### All-table restart verification
 
-`PIXELS_SQL_FIXTURE_RPC_TIMING=true` enables optional server-handler timing in
-the real SQL backend fixture. `status.properties` records per-method calls,
-total nanoseconds and maximum nanoseconds. It excludes network transport and
-queueing before handler dispatch, and includes warmups and background RPCs.
-The disabled default does not collect timings. The baseline diagnostic run
-`/tmp/pixels-small-rpc-phases-20260926` showed 6600 AllocateWriter calls for
-1100 single-row transactions: Trino created six sinks per transaction but only
-one received rows.
-
-Writer allocation is lazy on the first nonempty Page. Empty or aborted-before-
-input sinks do not allocate backend identities, while each nonempty sink still
-receives its own durable writer ID. Keyless routing seeds its batch round-robin
-with both transaction and writer identity, so transaction-local writer IDs do
-not concentrate independent small transactions on the same vnode. Three
-`TestPixelsInsertPageSink` tests cover empty/aborted sinks, per-sink allocation
-and multi-vnode distribution; the existing 13 writer tests remain enabled.
-
-The final four-vnode run `/tmp/pixels-small-lazy-routing-20260926` completed
-1000 measured explicit transactions at 55.11 transactions/s, client P50
-269.528 ms, explicit COMMIT P50 29.340 ms and commit-to-visible latency
-2604.418 ms. Including 100 warmups, it recorded 1100 AllocateWriter calls and
-four output files. The instrumented eager-allocation baseline measured 51.86
-transactions/s and client P50 293.021 ms. This single comparison shows a modest
-gain, not a sustained capacity claim. The 16 writer/sink unit tests and
-40-check FILE+DURABLE SQL run in `/tmp/pixels-lazy-routing-sql-20260926` passed;
-both SQL processes exited normally. The remaining participant-handler waits
-still need lock-contention profiling before further synchronization changes.
-
-Run the second command after the configured buffer flush interval and again
-after stopping and restarting the normal Coordinator and Retina JVMs. It
+For the all-table verification commands above, run the verify-only command after
+the configured buffer flush interval and again after stopping and restarting
+the normal Coordinator and Retina JVMs. It
 compares row counts and an order-independent checksum of every column. Before
 restart, record the recovery-checkpoint pointer and verify that WAL and
 installer state have actually shrunk; a READY message alone is insufficient.
@@ -554,16 +508,9 @@ a bounded failure domain. TPC-DS tiny `customer_demographics` contains
 1,920,800 rows, so the default 1,000,000-row limit deliberately rejects that
 one-statement load; the all-table verification uses 3,000,000.
 
-On September 13, 2026 the normal-daemon run inserted 2,695,496 rows across all
-32 tables. After the 60-second forced flush, WAL fell from 218 MiB to 12 KiB and
-installer state from 128 KiB to 16 KiB. A process restart loaded the published
-checkpoint with zero pending replay segments, and all 32 row multisets matched.
-
-The same run exposed and fixed two recovery-only failures: replay now preserves
-the recorded file identity when a plan crosses a file boundary, and local
-object reads copy reader-owned direct/mapped memory before closing the reader.
-These are required for deterministic recovery; neither may be replaced by
-allocating a fresh file or returning a buffer owned by a closed reader.
+Recovery preserves the recorded file identity when a plan crosses a file
+boundary. Local object reads copy reader-owned direct/mapped memory before
+closing the reader; callers must not retain buffers owned by a closed reader.
 
 ### Local Trino smoke test
 
