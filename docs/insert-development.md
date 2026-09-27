@@ -305,19 +305,25 @@ PIXELS_HOME=/path/to/pixels-home ETCD_BIN=/path/to/etcd SQL_E2E_SKIP_BUILD=1 \
 This entry point defaults to `tpch.sf10` and `tpcds.sf10`, all 32 tables and
 all columns, two Trino workers, four vnodes, and FILE + DURABLE. It creates a
 fresh isolated environment and never resumes a previous import. Each table
-uses one INSERT followed by a visibility barrier. Accepted time measures the
-INSERT through its durable commit acknowledgement; commit-to-visible latency
-measures the subsequent barrier wait. Source generation during INSERT is
+uses numeric-key ranges targeting 10 million rows per INSERT, configurable
+with `ALL_TPC_TRANSACTION_ROWS`. Each INSERT is an independent transaction;
+a visibility barrier runs once after all INSERTs for that table. Accepted time
+is the sum of INSERT execution times through their durable commit acknowledgements;
+commit-to-visible latency measures the barrier wait after the final INSERT.
+Source generation during INSERT is
 included, while separate source scans and result verification are excluded.
 Every table is checked using row count and an order-independent full-column
 checksum.
 
 The defaults reserve 6 GiB heap each for engine and backend, allow up to
-200 million rows per transaction (including SF10 inventory's 133,110,000 rows),
-reserve up to 1.5 GiB of installation-plan capacity, bound WAL payload to
+20 million rows per transaction, reserve up to 1 GiB of installation-plan
+capacity, bound WAL payload to
 64 GiB, and allow four
 hours for the run. Batch payload is capped at 1 MiB to leave room for the RPC
-envelope. The script exposes these settings as environment overrides.
+envelope. The script exposes these settings as environment overrides. The row
+target is approximate because equal-width key ranges need not have equal row
+counts; the log records the actual transaction count and largest transaction.
+The prepared-row limit includes headroom over the target.
 
 The existing benchmark lifecycle starts its own etcd process and enables
 recovery checkpoints and WAL reclamation. It does not use a shared etcd instance.
