@@ -298,7 +298,7 @@ Build Pixels with JDK 8 and the connector with JDK 23 as described above, then
 run with JDK 23 and the matching native runtime:
 
 ~~~sh
-PIXELS_HOME=/path/to/pixels-home SQL_E2E_SKIP_BUILD=1 \
+PIXELS_HOME=/path/to/pixels-home ETCD_BIN=/path/to/etcd SQL_E2E_SKIP_BUILD=1 \
   bash tools/benchmark-all-tpc-tables.sh /path/to/pixels
 ~~~
 
@@ -314,9 +314,13 @@ checksum.
 
 The defaults reserve 6 GiB heap each for engine and backend, allow up to
 200 million rows per transaction (including SF10 inventory's 133,110,000 rows),
-bound WAL payload to 64 GiB, and allow four
+reserve up to 1.5 GiB of installation-plan capacity, bound WAL payload to
+64 GiB, and allow four
 hours for the run. Batch payload is capped at 1 MiB to leave room for the RPC
 envelope. The script exposes these settings as environment overrides.
+
+The existing benchmark lifecycle starts its own etcd process and enables
+recovery checkpoints and WAL reclamation. It does not use a shared etcd instance.
 
 The JDBC client, Trino servers, connector, TCP/gRPC, WAL, installation, indexes,
 visibility and Pixels file I/O are real. Metadata, node discovery and external

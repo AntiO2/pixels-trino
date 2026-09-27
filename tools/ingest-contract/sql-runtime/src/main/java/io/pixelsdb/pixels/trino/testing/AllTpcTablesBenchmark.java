@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
 
@@ -23,12 +24,20 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 public final class AllTpcTablesBenchmark {
     private static final int WORKERS = 2;
     private static final String SOURCE_SPLITS_PER_NODE = "4";
+    private static final long CHECKPOINT_POLL_MILLIS = 100L;
+    private static final long DEFAULT_CHECKPOINT_TIMEOUT_SECONDS = 300L;
 
-    public static void main(String[] args) throws Exception {
+    private static Properties status(Path control) throws Exception {
         Properties status = new Properties();
-        try (var input = Files.newInputStream(Path.of(args[0], "status.properties"))) {
+        try (var input = Files.newInputStream(control.resolve("status.properties"))) {
             status.load(input);
         }
+        return status;
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path control = Path.of(args[0]);
+        Properties status = status(control);
         List<URL> urls = new ArrayList<>();
         for (String entry : Files.readString(Path.of(args[1])).trim().split(java.io.File.pathSeparator)) {
             urls.add(Path.of(entry).toUri().toURL());
@@ -56,6 +65,21 @@ public final class AllTpcTablesBenchmark {
             AllTpcTablesInsert.main(new String[] {
                     jdbcUrl, Path.of(status.getProperty("dataRoot"), "all-tpc").toString(),
                     "tpc_insert_all", "pixels"});
+            long timeoutSeconds = Long.parseLong(System.getenv().getOrDefault(
+                    "ALL_TPC_CHECKPOINT_TIMEOUT_SECONDS",
+                    Long.toString(DEFAULT_CHECKPOINT_TIMEOUT_SECONDS)));
+            if (timeoutSeconds <= 0) {
+                throw new IllegalArgumentException("Checkpoint timeout must be positive");
+            }
+            long start = System.nanoTime();
+            while (Long.parseLong(status(control).getProperty("activeTransactions")) != 0) {
+                if (System.nanoTime() - start >= TimeUnit.SECONDS.toNanos(timeoutSeconds)) {
+                    throw new AssertionError("Benchmark transactions were not checkpointed and retired");
+                }
+                Thread.sleep(CHECKPOINT_POLL_MILLIS);
+            }
+            System.out.println("ALL_TPC_LIFECYCLE_PASS activeTransactions=0 checkpointWaitMs="
+                    + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
         }
     }
 }

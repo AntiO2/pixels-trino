@@ -180,6 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           SQL_E2E_WORK_DIR="$PWD/verification/all-tpc-tables" \
+            ETCD_BIN="$PWD/verification/etcd-v3.5.17-linux-amd64/etcd" \
             TPCH_SCHEMA=tiny TPCDS_SCHEMA=tiny \
             PIXELS_SQL_FIXTURE_MAX_PREPARED_ROWS=3000000 \
             PIXELS_SQL_FIXTURE_MAX_STATE_BYTES=268435456 \
