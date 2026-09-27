@@ -313,7 +313,8 @@ Every table is checked using row count and an order-independent full-column
 checksum.
 
 The defaults reserve 6 GiB heap each for engine and backend, allow up to
-70 million rows per transaction, bound WAL payload to 64 GiB, and allow four
+200 million rows per transaction (including SF10 inventory's 133,110,000 rows),
+bound WAL payload to 64 GiB, and allow four
 hours for the run. Batch payload is capped at 1 MiB to leave room for the RPC
 envelope. The script exposes these settings as environment overrides.
 
@@ -427,27 +428,10 @@ PixelsWriter output. Metadata uses the catalog fixture. CSV preparation is
 excluded, input is warm, and output footer row counts are checked. This baseline
 does not perform transactional WAL or MainIndex installation.
 
-September 27, 2026, two Trino workers, one Retina owner, four vnodes,
-eight concurrent INSERTs, staged input:
-
-Implementation: Pixels `912237f84269f3f8a09565c5863d9f28b682bed5` and
-Pixels-Trino `2f6cea4402bd043592fcf935f104e8adf57a935e`.
-
-| Projection | Rows | DURABLE accepted | Accepted rows/s | Commit-to-visible | Start-to-visible | CLI writer |
-|---|---:|---:|---:|---:|---:|---:|
-| TPC-H SF10 lineitem | 59,986,052 | 21.108 s | 2,841,837 | 23.263 s | 44.371 s | 26.156 s |
-| TPC-DS SF10 store_sales | 28,800,991 | 6.268 s | 4,594,887 | 5.551 s | 11.819 s | 6.798 s |
-
 Accepted time ends after all INSERTs return with durable COMMIT decisions.
 Commit-to-visible starts there and ends when the fixed-boundary barrier returns.
-It is a latency, not a throughput. Source staging took 6.328 s and 15.466 s;
-verification took 55.349 s and 44.574 s respectively. Both count and
-order-independent all-projected-column checksums matched. The run produced
-32 Pixels files with 1,428 Append RPCs, retired all transactions, reclaimed
-the payload WAL to 12 KiB, and shut down the backend normally. The CLI writer
-times are the separately measured native baseline. Start-to-visible time is
-1.70x / 1.74x that baseline; repeated-run distributions and independent
-background materialization-rate measurements remain follow-up work.
+It is a latency, not a throughput. Compare native-writer and transactional
+results only when both use the same projection and input preparation.
 
 Keyless PageSinks combine successive Trino Pages up to the configured batch
 row or byte limit, account for retained rows, and apply backpressure while
